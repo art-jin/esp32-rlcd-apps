@@ -78,12 +78,23 @@ Desktop.ini
 *.sln.docstates # Visual Studio
 
 # Project-specific exclusions
-github_reference/        # Vendor reference materials (Waveshare examples, not part of build)
-.idea/                   # PyCharm project files
-.vscode/                 # VS Code workspace files
-.cache/                  # Clangd cache
-.devcontainer/           # Dev container config (user-specific)
-.claude/                 # Claude Code local state
-dependencies.lock        # ESP-IDF component manager lock (auto-regenerated)
-.last_iteration          # idf.py incremental build state
-sdkconfig.bak.*          # sdkconfig backups
+# Vendor reference materials (Waveshare examples, not part of build)
+github_reference/
+
+# Editor / IDE
+.idea/
+.vscode/
+.devcontainer/
+
+# Clangd cache
+.cache/
+
+# Claude Code local state
+.claude/
+
+# ESP-IDF component manager lock (auto-regenerated)
+dependencies.lock
+.last_iteration
+
+# sdkconfig backups
+sdkconfig.bak.*
