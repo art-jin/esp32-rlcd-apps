@@ -23,7 +23,9 @@ Built on ESP-IDF v6.0.1. Tested on ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB oct
 - **Display**: ST7306 400×300 monochrome reflective LCD (SPI)
 - **Audio**: ES8311 (speaker) + ES7210 (4-channel mic) over I2S
 - **Sensors**: SHTC3 temperature/humidity (I²C @ 0x70, shared with codecs)
-- **Buttons**: BOOT (GPIO0), KEY (GPIO18), plus a 3-key keyboard (GPIO1/3/17) connected via the 2×8 header
+- **Buttons**:
+  - **Factory single-key**: BOOT (GPIO0, download only) + PWR (hardware power) + KEY (GPIO18, the **only** button usable for App UI)
+  - **4-key extension**: adds PREV / NEXT / ENTER / BACK via the 2×8 header (GPIO1/3/17/43)
 
 ### GPIO map
 
@@ -35,10 +37,12 @@ Built on ESP-IDF v6.0.1. Tested on ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB oct
 | I²C SDA / SCL (codecs + SHTC3) | 13 / 14 |
 | Battery ADC (3× divider) | 2 |
 | BOOT (XiaoZhi voice trigger) | 0 |
-| PREV / NEXT / ENTER (external keyboard) | 1 / 3 / 17 |
-| KEY (long-press, voice input in CodePilot) | 18 |
+| PREV / NEXT / ENTER / BACK (4-key extension only) | 1 / 3 / 17 / 43 |
+| KEY (single-key hw: short + long + double-click; 4-key hw: USER + long-press) | 18 |
 
-> GPIO43 was originally UART0 TX. The firmware redirects console output to USB-Serial/JTAG, freeing GPIO43. Since the build has no physical button on GPIO43, GPIO18 short-press is aliased to BACK at the dispatcher level.
+> **Hardware variants**: factory single-key hardware has only BOOT + PWR + KEY (GPIO18). The 4-key extension adds PREV/NEXT/ENTER/BACK. The 4-key flag is captured at AP provisioning time (captive portal checkbox) and stored in NVS.
+>
+> GPIO43 was originally UART0 TX. The firmware redirects console output to USB-Serial/JTAG, freeing GPIO43 for the BACK button on 4-key hardware. Single-key hardware routes GPIO18 through double-click detection (short press, double-click, long-press) — see [`docs/single_key_navigation.md`](docs/single_key_navigation.md) for the interaction matrix.
 
 ## Build & flash
 
@@ -122,6 +126,8 @@ Logs go through USB-Serial/JTAG (the same USB port used for flashing). No extern
 ```
 
 The `app_manager` dispatcher task is the only thread that calls each app's `on_key` / `on_tick_1s` hooks. Apps spawn their own worker tasks for slow operations (HTTP fetches, game loops, WS receive). Cooperative shutdown via `stop_flag` + semaphore ensures clean resource release on every switch (no `vTaskDelete` strong-arming).
+
+**Factory single-App firmware**: the KinCal build enables only Calendar (other apps gated by `CONFIG_KINCAL_APP_*`). The dispatcher skips MENU and boots straight into Calendar — this avoids stranding the original single-key Waveshare board (only GPIO18 available for App UI) on a screen that requires `KEY_ENTER` to leave. Multi-App builds still go through MENU. See [`docs/single_key_navigation.md`](docs/single_key_navigation.md) for the full single-key navigation design.
 
 ## CodePilot PC bridge
 

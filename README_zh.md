@@ -23,7 +23,9 @@
 - **屏幕**：ST7306 400×300 单色反射 LCD（SPI）
 - **音频**：ES8311（扬声器）+ ES7210（4 通道麦克风）走 I2S
 - **传感器**：SHTC3 温湿度（I²C 地址 0x70，与 codec 共享总线）
-- **按键**：BOOT (GPIO0)、KEY (GPIO18)，外加通过 2×8 排针接入的 3 键键盘（GPIO1/3/17）
+- **按键**：
+  - **原厂单键**：BOOT (GPIO0, 仅下载模式) + PWR (硬件电源) + KEY (GPIO18，**唯一**可用于 App UI 的按键)
+  - **扩展 4 键**：通过 2×8 排针接入 PREV / NEXT / ENTER / BACK（GPIO1/3/17/43）
 
 ### GPIO 分配
 
@@ -35,10 +37,12 @@
 | I²C SDA / SCL（codec + SHTC3）| 13 / 14 |
 | 电池 ADC（3 倍分压）| 2 |
 | BOOT（小智语音触发）| 0 |
-| PREV / NEXT / ENTER（外接键盘）| 1 / 3 / 17 |
-| KEY（长按，CodePilot 语音输入）| 18 |
+| PREV / NEXT / ENTER / BACK（仅 4 键扩展）| 1 / 3 / 17 / 43 |
+| KEY（单键 hw：短按+长按+双击；4 键 hw：USER + 长按）| 18 |
 
-> GPIO43 原本是 UART0 TX。固件把 console 输出重定向到 USB-Serial/JTAG，从而释放 GPIO43。由于当前板子上 GPIO43 没有物理按钮，dispatcher 层把 GPIO18 短按映射为 BACK。
+> **硬件变体**：原厂单键硬件只有 BOOT + PWR + KEY (GPIO18)。扩展 4 键加 PREV/NEXT/ENTER/BACK。4 键标志在 AP 配网时通过 captive portal 勾选框采集，存入 NVS。
+>
+> GPIO43 原本是 UART0 TX。固件把 console 输出重定向到 USB-Serial/JTAG，从而释放 GPIO43 给 4 键硬件的 BACK 按钮。单键硬件把 GPIO18 走双击检测（短按、双击、长按三种手势）——交互矩阵详见 [`docs/single_key_navigation.md`](docs/single_key_navigation.md)。
 
 ## 构建和烧录
 
@@ -123,6 +127,8 @@ idf.py -p /dev/cu.usbmodem21201 monitor
 
 `app_manager` 的 dispatcher 任务是唯一调用各 app `on_key` / `on_tick_1s` 钩子的线程。各 app 自己启动 worker 任务处理慢操作（HTTP 拉取、游戏循环、WS 接收）。通过 `stop_flag` + 信号量实现协作式退出，确保每次切换都干净释放资源（不做 `vTaskDelete` 强杀）。
 
+**出厂单 App 固件**：KinCal 构建默认只启用日历（其他 App 由 `CONFIG_KINCAL_APP_*` 开关控制）。dispatcher 启动时跳过 MENU，直接进入日历——这是为了让原厂单键板子（只有 GPIO18 可用于 App UI）不会卡在需要 `KEY_ENTER` 才能离开的菜单屏。多 App 构建仍走 MENU。完整单键导航设计见 [`docs/single_key_navigation.md`](docs/single_key_navigation.md)。
+
 ## CodePilot PC Bridge
 
 CodePilot 应用从 PC 端 bridge 接收状态更新，bridge 监控 Claude Code（可选 Kimi）进程。
@@ -148,3 +154,4 @@ Apache 2.0。详见 [LICENSE](LICENSE)。
 - [Waveshare](https://www.waveshare.com/) 提供 ESP32-S3-RLCD-4.2 板子和参考示例
 - [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32)（作者 78）提供小智语音助手协议
 - [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) v6.0.1（Espressif）
+- claude --resume 59e39ad1-1613-4c0d-8b76-f6c34820104a
