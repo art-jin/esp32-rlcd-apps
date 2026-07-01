@@ -13,6 +13,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -23,8 +24,14 @@ static const char *TAG = "keyboard";
 #define LONG_PRESS_MS      500
 #define POLL_PERIOD_MS     50
 #define KB_QUEUE_LEN       16
+#define DOUBLE_CLICK_MS    250  // window for second press to count as double-click
 
 #define KB_GPIO_USER       18
+
+// Cached at init: whether GPIO43 BACK button is physically present.
+// Read from NVS ("wifi_creds" namespace, key "has_back_key"). Default false
+// matches original Waveshare 3-key RLCD hardware.
+static bool s_has_back_key = false;
 
 static QueueHandle_t s_kb_queue = NULL;
 
@@ -37,17 +44,25 @@ static volatile bool       s_user_pressed     = false;
 static volatile bool       s_user_long_reported = false;
 static esp_timer_handle_t  s_user_timer       = NULL;
 
+// Double-click pending state (single-key hw only, !s_has_back_key).
+// Set on first short-press release; cleared by either the second press's
+// release (→ emit KEY_DOUBLE_CLICK) or by the periodic timer after
+// DOUBLE_CLICK_MS elapsed without a second press (→ emit KEY_USER).
+static volatile bool       s_pending_click     = false;
+static volatile TickType_t s_pending_click_tick = 0;
+
 static const char *key_name(key_event_t k)
 {
     switch (k) {
-        case KEY_PREV:       return "PREV";
-        case KEY_NEXT:       return "NEXT";
-        case KEY_ENTER:      return "ENTER";
-        case KEY_BACK:       return "BACK";
-        case KEY_USER:       return "USER(short)";
-        case KEY_LONG_START: return "LONG_START";
-        case KEY_LONG_END:   return "LONG_END";
-        default:             return "NONE";
+        case KEY_PREV:         return "PREV";
+        case KEY_NEXT:         return "NEXT";
+        case KEY_ENTER:        return "ENTER";
+        case KEY_BACK:         return "BACK";
+        case KEY_USER:         return "USER(short)";
+        case KEY_DOUBLE_CLICK: return "DOUBLE";
+        case KEY_LONG_START:   return "LONG_START";
+        case KEY_LONG_END:     return "LONG_END";
+        default:               return "NONE";
     }
 }
 
@@ -64,7 +79,7 @@ static void IRAM_ATTR kb_simple_isr(void *arg)
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-// ── GPIO18 long-press state machine ──────────────────────────────────────────
+// ── GPIO18 long-press + double-click state machine ───────────────────────────
 static void IRAM_ATTR kb_user_isr(void *arg)
 {
     int level = gpio_get_level(KB_GPIO_USER);  // 0 = pressed, 1 = released
@@ -87,8 +102,21 @@ static void IRAM_ATTR kb_user_isr(void *arg)
                 // Short press if released before threshold
                 TickType_t elapsed = now - s_user_press_tick;
                 if (elapsed < pdMS_TO_TICKS(LONG_PRESS_MS)) {
-                    key_event_t evt = KEY_USER;
-                    xQueueSendFromISR(s_kb_queue, &evt, &xHigherPriorityTaskWoken);
+                    if (!s_has_back_key && s_pending_click) {
+                        // Second short press within window → double-click
+                        s_pending_click = false;
+                        key_event_t evt = KEY_DOUBLE_CLICK;
+                        xQueueSendFromISR(s_kb_queue, &evt, &xHigherPriorityTaskWoken);
+                    } else if (!s_has_back_key) {
+                        // Single-key mode: defer emission to detect potential
+                        // double-click. Timer emits KEY_USER after window elapses.
+                        s_pending_click = true;
+                        s_pending_click_tick = now;
+                    } else {
+                        // 4-key mode: emit immediately (legacy behavior)
+                        key_event_t evt = KEY_USER;
+                        xQueueSendFromISR(s_kb_queue, &evt, &xHigherPriorityTaskWoken);
+                    }
                 }
                 // else: right at threshold, ignore (long_start may have just fired)
             }
@@ -98,23 +126,36 @@ static void IRAM_ATTR kb_user_isr(void *arg)
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
-// 50ms periodic timer: detects long-press threshold crossing
+// 50ms periodic timer: detects long-press threshold crossing and
+// (in single-key mode) flushes a pending single-click if no second press arrived.
 static void user_timer_cb(void *arg)
 {
-    if (s_user_long_reported || !s_user_pressed) return;
-
-    int lvl = gpio_get_level(KB_GPIO_USER);
-    // Double-check level (race window between ISR and timer)
-    if (lvl != 0) {
-        s_user_pressed = false;
-        return;
+    // Long-press detection (existing)
+    if (s_user_pressed && !s_user_long_reported) {
+        int lvl = gpio_get_level(KB_GPIO_USER);
+        // Double-check level (race window between ISR and timer)
+        if (lvl != 0) {
+            s_user_pressed = false;
+        } else {
+            TickType_t now = xTaskGetTickCount();
+            if ((now - s_user_press_tick) >= pdMS_TO_TICKS(LONG_PRESS_MS)) {
+                s_user_long_reported = true;
+                key_event_t evt = KEY_LONG_START;
+                xQueueSend(s_kb_queue, &evt, 0);
+            }
+        }
     }
 
-    TickType_t now = xTaskGetTickCount();
-    if ((now - s_user_press_tick) >= pdMS_TO_TICKS(LONG_PRESS_MS)) {
-        s_user_long_reported = true;
-        key_event_t evt = KEY_LONG_START;
-        xQueueSend(s_kb_queue, &evt, 0);
+    // Pending click timeout (single-key mode only). The s_user_pressed
+    // guard prevents racing with a second press that's currently held —
+    // in that case the ISR will resolve the gesture on release.
+    if (!s_has_back_key && s_pending_click && !s_user_pressed) {
+        TickType_t now = xTaskGetTickCount();
+        if ((now - s_pending_click_tick) >= pdMS_TO_TICKS(DOUBLE_CLICK_MS)) {
+            s_pending_click = false;
+            key_event_t evt = KEY_USER;
+            xQueueSend(s_kb_queue, &evt, 0);
+        }
     }
 }
 
@@ -123,7 +164,19 @@ void keyboard_init(void)
 {
     s_kb_queue = xQueueCreate(KB_QUEUE_LEN, sizeof(key_event_t));
 
-    // Register 4 simple keys (GPIO1/3/17/43)
+    // Read 4-key hardware flag from NVS. Default false (3-key factory build).
+    nvs_handle_t h;
+    if (nvs_open("wifi_creds", NVS_READONLY, &h) == ESP_OK) {
+        uint8_t val = 0;
+        nvs_get_u8(h, "has_back_key", &val);
+        s_has_back_key = (val != 0);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "Has BACK key (GPIO43): %s", s_has_back_key ? "yes" : "no");
+
+    // Register simple keys. GPIO43 (BACK) is included only when the device
+    // physically has the 4th key — otherwise the pin stays floating/unconfigured
+    // and KEY_BACK is reached via the KEY_USER alias in app_manager.c.
     static const struct {
         int gpio;
         key_event_t key;
@@ -137,6 +190,11 @@ void keyboard_init(void)
     const int simple_count = sizeof(simple_pins) / sizeof(simple_pins[0]);
 
     for (int i = 0; i < simple_count; i++) {
+        if (simple_pins[i].key == KEY_BACK && !s_has_back_key) {
+            ESP_LOGI(TAG, "GPIO %d (BACK) skipped — no 4-key hardware",
+                     simple_pins[i].gpio);
+            continue;
+        }
         gpio_config_t io_conf = {
             .pin_bit_mask = (1ULL << simple_pins[i].gpio),
             .mode = GPIO_MODE_INPUT,
@@ -189,12 +247,20 @@ void keyboard_init(void)
             };
             esp_timer_create(&timer_args, &s_user_timer);
             esp_timer_start_periodic(s_user_timer, POLL_PERIOD_MS * 1000);
-            ESP_LOGI(TAG, "GPIO %d (USER) initialized with long-press (%dms threshold), level=%d",
-                     KB_GPIO_USER, LONG_PRESS_MS, gpio_get_level(KB_GPIO_USER));
+            ESP_LOGI(TAG, "GPIO %d (USER) initialized with long-press (%dms threshold)%s, level=%d",
+                     KB_GPIO_USER, LONG_PRESS_MS,
+                     s_has_back_key ? "" : " + double-click (250ms window)",
+                     gpio_get_level(KB_GPIO_USER));
         }
     }
 
-    ESP_LOGI(TAG, "Keyboard: PREV=GPIO1, NEXT=GPIO3, ENTER=GPIO17, BACK=GPIO43, USER=GPIO18(long-press)");
+    ESP_LOGI(TAG, "Keyboard: PREV=GPIO1, NEXT=GPIO3, ENTER=GPIO17, BACK=GPIO43%s, USER=GPIO18(long-press)",
+             s_has_back_key ? "" : "(via USER alias)");
+}
+
+bool keyboard_has_back_key(void)
+{
+    return s_has_back_key;
 }
 
 key_event_t keyboard_poll(void)

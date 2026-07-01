@@ -9,6 +9,7 @@
 #include "app_framework.h"
 #include "st7306.h"
 #include "hzk16.h"
+#include "keyboard.h"
 #include "xiaozhi_app_display.h"  // reuse status bar
 #include "wifi_manager.h"
 #include "battery.h"
@@ -95,16 +96,33 @@ static void draw_bottom_hint(void)
     st7306_draw_filled_rect(0, y - 2, ST7306_WIDTH, 24, ST7306_COLOR_WHITE);
     st7306_draw_hline(0, ST7306_WIDTH - 1, y - 2, ST7306_COLOR_BLACK);
 
-    // "<- ->" on left, "OK" hint on right
-    st7306_draw_text(8, y, "PREV/NEXT:", ST7306_COLOR_BLACK);
-    int x = 8 + 10 * 8;
-    hzk16_draw_gb_text(x, y, gb_xuanze, ST7306_COLOR_BLACK);
+    if (!keyboard_has_back_key()) {
+        // Single-key hint: "KEY:选择" (left), "双击:进入" (right)
+        st7306_draw_text(8, y, "KEY:", ST7306_COLOR_BLACK);
+        int x = 8 + 4 * 8;
+        hzk16_draw_gb_text(x, y, gb_xuanze, ST7306_COLOR_BLACK);
 
-    int jin_w = 8 * 3 + 16 + hzk16_text_width(gb_jinru);
-    int jx = ST7306_WIDTH - jin_w - 8;
-    st7306_draw_text(jx, y, "OK:", ST7306_COLOR_BLACK);
-    jx += 3 * 8;
-    hzk16_draw_gb_text(jx, y, gb_jinru, ST7306_COLOR_BLACK);
+        // 双击 = 0xCB, 0xAB, 0xBC, 0xF4
+        static const uint8_t gb_shuangji[] = {0xCB, 0xAB, 0xBC, 0xF4, 0};
+        int right_w = 8 * 4 + 16 + hzk16_text_width(gb_jinru);  // "双击:进入"
+        int rx = ST7306_WIDTH - right_w - 8;
+        hzk16_draw_gb_text(rx, y, gb_shuangji, ST7306_COLOR_BLACK);
+        rx += 16;
+        st7306_draw_text(rx, y, ":", ST7306_COLOR_BLACK);
+        rx += 8;
+        hzk16_draw_gb_text(rx, y, gb_jinru, ST7306_COLOR_BLACK);
+    } else {
+        // 4-key hint: "PREV/NEXT:选择" (left), "OK:进入" (right)
+        st7306_draw_text(8, y, "PREV/NEXT:", ST7306_COLOR_BLACK);
+        int x = 8 + 10 * 8;
+        hzk16_draw_gb_text(x, y, gb_xuanze, ST7306_COLOR_BLACK);
+
+        int jin_w = 8 * 3 + 16 + hzk16_text_width(gb_jinru);
+        int jx = ST7306_WIDTH - jin_w - 8;
+        st7306_draw_text(jx, y, "OK:", ST7306_COLOR_BLACK);
+        jx += 3 * 8;
+        hzk16_draw_gb_text(jx, y, gb_jinru, ST7306_COLOR_BLACK);
+    }
     st7306_update_display();
     app_manager_display_unlock();
 }
@@ -158,20 +176,39 @@ void menu_on_exit(void)
 void menu_on_key(key_event_t key)
 {
     int old_cursor = s_cursor;
-    switch (key) {
-        case KEY_PREV:
-            s_cursor = (s_cursor - 1 + (int)MENU_ITEM_COUNT) % MENU_ITEM_COUNT;
-            break;
-        case KEY_NEXT:
-            s_cursor = (s_cursor + 1) % MENU_ITEM_COUNT;
-            break;
-        case KEY_ENTER:
-            ESP_LOGI(TAG, "ENTER: switching to app %d", s_menu_items[s_cursor]);
-            app_manager_switch(s_menu_items[s_cursor]);
-            return;
-        default:
-            return;
+
+    // Single-key hardware: GPIO18 short-press cycles forward (no PREV/NEXT),
+    // double-click confirms. Long-press is a no-op (menu is the top-level).
+    if (!keyboard_has_back_key()) {
+        switch (key) {
+            case KEY_USER:           // single click = next item (wrap)
+                s_cursor = (s_cursor + 1) % MENU_ITEM_COUNT;
+                break;
+            case KEY_DOUBLE_CLICK:   // double click = enter selected app
+                ESP_LOGI(TAG, "DOUBLE: switching to app %d", s_menu_items[s_cursor]);
+                app_manager_switch(s_menu_items[s_cursor]);
+                return;
+            default:
+                return;
+        }
+    } else {
+        // 4-key hardware: PREV/NEXT/ENTER navigation (legacy)
+        switch (key) {
+            case KEY_PREV:
+                s_cursor = (s_cursor - 1 + (int)MENU_ITEM_COUNT) % MENU_ITEM_COUNT;
+                break;
+            case KEY_NEXT:
+                s_cursor = (s_cursor + 1) % MENU_ITEM_COUNT;
+                break;
+            case KEY_ENTER:
+                ESP_LOGI(TAG, "ENTER: switching to app %d", s_menu_items[s_cursor]);
+                app_manager_switch(s_menu_items[s_cursor]);
+                return;
+            default:
+                return;
+        }
     }
+
     if (s_cursor != old_cursor) {
         ESP_LOGI(TAG, "Cursor moved: %d -> %d", old_cursor, s_cursor);
         draw_item(old_cursor, false);

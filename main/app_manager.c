@@ -55,18 +55,28 @@ static void dispatcher_task(void *arg)
 {
     ESP_LOGI(TAG, "Dispatcher task started");
 
-    // Enter initial app (MENU)
-    enter_app(APP_ID_MENU);
+    // Single-App factory firmware (Calendar-only): skip MENU entirely so
+    // single-key hardware (only GPIO18 available) isn't stranded on a
+    // screen that requires KEY_ENTER to leave. Multi-App builds still
+    // boot into MENU as before.
+    app_id_t initial = (app_registry_count_enabled() == 1)
+                       ? APP_ID_CALENDAR
+                       : APP_ID_MENU;
+    enter_app(initial);
 
     while (1) {
         key_event_t key = keyboard_wait(pdMS_TO_TICKS(DISPATCHER_TICK_MS));
 
         if (key != KEY_NONE) {
-            // GPIO18 short-press (KEY_USER) is aliased to BACK because GPIO43
-            // has no physical button on this build. GPIO18 long-press
-            // (KEY_LONG_START/END) remains available for CodePilot voice input
-            // (Phase B).
-            if (key == KEY_USER) {
+            // GPIO18 (USER) event routing on single-key hardware (no BACK key):
+            //   - MENU app: receives raw KEY_USER (cycle) + KEY_DOUBLE_CLICK (enter)
+            //   - Other apps: KEY_USER is aliased to KEY_BACK so existing apps
+            //     that only handle KEY_BACK (snake/tetris/xiaozhi/codepilot)
+            //     keep working without modification. KEY_DOUBLE_CLICK and
+            //     KEY_LONG_* are passed through (apps may opt-in to handle).
+            // 4-key hardware: every event delivered as-is.
+            if (key == KEY_USER && !keyboard_has_back_key() &&
+                s_current && s_current->id != APP_ID_MENU) {
                 key = KEY_BACK;
             }
             if (s_current && s_current->on_key) {

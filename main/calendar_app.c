@@ -265,7 +265,46 @@ void calendar_on_key(key_event_t key)
             calendar_confirm_selection();
             break;
         case KEY_BACK:
-            app_manager_switch(APP_ID_MENU);
+            // BACK (4-key hw) or USER-short-press (single-key hw, aliased to
+            // BACK by dispatcher):
+            // - If a day is selected, clear it and snap cursor back to today.
+            // - Otherwise, only return to menu if other apps exist — on the
+            //   KinCal-only factory build Calendar is the only app, so BACK
+            //   becomes a no-op rather than stranding the user in an empty menu.
+            if (calendar_has_selection()) {
+                calendar_clear_selection();
+                time_t now;
+                time(&now);
+                struct tm ti;
+                localtime_r(&now, &ti);
+                app_manager_display_lock();
+                calendar_draw_with_weather(ti.tm_year + 1900, ti.tm_mon + 1,
+                                           ti.tm_mday, &g_weather);
+                if (g_event_count > 0) {
+                    calendar_set_events(g_events, g_event_count,
+                                        ti.tm_year + 1900, ti.tm_mon + 1,
+                                        ti.tm_mday, &g_weather);
+                }
+                calendar_draw_status_bar(&ti, wifi_manager_get_rssi(),
+                                         battery_get_level());
+                st7306_update_display();
+                app_manager_display_unlock();
+                return;
+            }
+            if (app_registry_count_enabled() > 1) {
+                app_manager_switch(APP_ID_MENU);
+            } else {
+                ESP_LOGI(TAG, "BACK no-op (single-app firmware, no selection)");
+            }
+            return;
+        case KEY_LONG_START:
+            // Single-key hardware: long-press is the only way back to MENU
+            // when there are multiple apps (USER-short is consumed by the
+            // dispatcher's USER→BACK alias for clear-selection). 4-key
+            // hardware keeps long-press for CodePilot STT trigger.
+            if (!keyboard_has_back_key() && app_registry_count_enabled() > 1) {
+                app_manager_switch(APP_ID_MENU);
+            }
             return;
         default:
             return;
