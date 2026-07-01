@@ -22,9 +22,9 @@
 #define STATUS_Y     (ST7306_HEIGHT - STATUS_H)      // 274
 #define GRID_BOTTOM  (STATUS_Y - 2)                  // 272
 
-#define PANEL_W      132    // Left panel width (weather + events)
-#define CAL_X        PANEL_W  // Calendar area start x (132)
-#define CAL_WIDTH    268    // Calendar area width
+#define PANEL_W      168    // Left panel width (weather + events)
+#define CAL_X        PANEL_W  // Calendar area start x (168)
+#define CAL_WIDTH    232    // Calendar area width (400 - PANEL_W)
 
 #define TAB_H        18    // Tab header height (black bg, white text)
 
@@ -44,7 +44,6 @@ static const uint8_t gb_du[]      = {0xB6, 0xC8, 0};                    // 度
 static const uint8_t gb_shidu[]   = {0xCA, 0xAA, 0xB6, 0xC8, 0};       // 湿度
 
 static const uint8_t gb_jinri[]   = {0xB4, 0xFA, 0xB0, 0xEC, 0xCA, 0xC2, 0xD2, 0xCB, 0}; // 代办事宜
-static const uint8_t gb_bullet[]  = {0xA1, 0xF1, 0};                    // ●
 static const uint8_t gb_noevent[] = {0xBD, 0xF1, 0xC8, 0xD5, 0xC3, 0xBB, 0xD3, 0xD0, 0xB0, 0xB2, 0xC5, 0xC5, 0};  // 今日没有安排
 static const uint8_t gb_key_xiaozhi[] = {'K','E','Y',':', 0xD0,0xA1, 0xD6,0xC7, 0};  // KEY:小智
 
@@ -65,6 +64,17 @@ static int s_today_count = 0;
 static caldav_event_t s_upcoming_events[CALDAV_MAX_EVENTS];
 static int s_upcoming_count = 0;
 static int s_event_year, s_event_month, s_event_day;  // date of current events
+
+// KinCal overrides (defined in kincal_bridge.c). When g_kincal_active,
+// these take precedence over the local static holiday table / lunar
+// computation. Set by kincal_bridge_apply(), cleared by kincal_bridge_clear().
+extern int     g_kincal_rest_days[32];
+extern uint8_t g_kincal_rest_count;
+extern int     g_kincal_event_dates[32];
+extern uint8_t g_kincal_event_count;
+extern uint8_t g_kincal_lunar_text[32];
+extern bool    g_kincal_has_lunar;
+extern bool    g_kincal_active;
 
 // Navigation selection state
 static bool s_has_selection = false;
@@ -185,6 +195,17 @@ static bool is_tiaoxiu_workday(int year, int month, int day)
 
 static bool is_rest_day(int year, int month, int day)
 {
+    // KinCal override: trust server-computed rest_days when active.
+    // Server already merged weekend + holiday - tiaoxiu, so this is the
+    // single source of truth when present.
+    if (g_kincal_active && g_kincal_rest_count > 0) {
+        for (int i = 0; i < g_kincal_rest_count; i++) {
+            if (g_kincal_rest_days[i] == day) return true;
+        }
+        return false;
+    }
+
+    // Legacy fallback: local static holiday + tiaoxiu tables.
     // 调休 workdays are never rest days
     if (is_tiaoxiu_workday(year, month, day)) return false;
 
@@ -224,26 +245,34 @@ static void draw_header(int year, int month, int day)
     }
 
     // Right: "农历四月十二"
-    lunar_date_t lunar;
-    if (solar_to_lunar(year, month, day, 12, &lunar) == 0) {
-        uint8_t lunar_str[32];
-        int pos = 0;
-        const uint8_t *p;
+    // Prefer KinCal's server-computed label (includes customary holiday
+    // overrides like "元宵" replacing "十五"). Fall back to local lunarcalendar.
+    if (g_kincal_active && g_kincal_has_lunar && g_kincal_lunar_text[0]) {
+        int lw = hzk16_text_width_14(g_kincal_lunar_text);
+        hzk16_draw_gb_text_14(CAL_X + CAL_WIDTH - lw - 6, y,
+                              g_kincal_lunar_text, ST7306_COLOR_BLACK);
+    } else {
+        lunar_date_t lunar;
+        if (solar_to_lunar(year, month, day, 12, &lunar) == 0) {
+            uint8_t lunar_str[32];
+            int pos = 0;
+            const uint8_t *p;
 
-        p = gb_lunar_prefix();
-        for (int i = 0; p[i] && pos < 28; i++) lunar_str[pos++] = p[i];
-        if (lunar.is_leap) {
-            p = gb_leap_char();
+            p = gb_lunar_prefix();
             for (int i = 0; p[i] && pos < 28; i++) lunar_str[pos++] = p[i];
-        }
-        p = lunar_month_name(lunar.month);
-        for (int i = 0; p[i] && pos < 28; i++) lunar_str[pos++] = p[i];
-        p = lunar_day_name(lunar.day);
-        for (int i = 0; p[i] && pos < 28; i++) lunar_str[pos++] = p[i];
-        lunar_str[pos] = 0;
+            if (lunar.is_leap) {
+                p = gb_leap_char();
+                for (int i = 0; p[i] && pos < 28; i++) lunar_str[pos++] = p[i];
+            }
+            p = lunar_month_name(lunar.month);
+            for (int i = 0; p[i] && pos < 28; i++) lunar_str[pos++] = p[i];
+            p = lunar_day_name(lunar.day);
+            for (int i = 0; p[i] && pos < 28; i++) lunar_str[pos++] = p[i];
+            lunar_str[pos] = 0;
 
-        int lw = hzk16_text_width_14(lunar_str);
-        hzk16_draw_gb_text_14(CAL_X + CAL_WIDTH - lw - 6, y, lunar_str, ST7306_COLOR_BLACK);
+            int lw = hzk16_text_width_14(lunar_str);
+            hzk16_draw_gb_text_14(CAL_X + CAL_WIDTH - lw - 6, y, lunar_str, ST7306_COLOR_BLACK);
+        }
     }
 
     st7306_draw_hline(CAL_X, CAL_X + CAL_WIDTH - 1, HEADER_H - 1, ST7306_COLOR_BLACK);
@@ -279,6 +308,14 @@ static void draw_weekday_labels(void)
 // Check if any event (today or upcoming) falls on the given date
 static bool has_events_on(int year, int month, int day)
 {
+    // KinCal override: server sends a flat event_dates list for the month.
+    if (g_kincal_active && g_kincal_event_count > 0) {
+        for (int i = 0; i < g_kincal_event_count; i++) {
+            if (g_kincal_event_dates[i] == day) return true;
+        }
+        return false;
+    }
+    // Legacy: scan today + upcoming event structs.
     for (int i = 0; i < s_today_count; i++) {
         if (s_today_events[i].year == year &&
             s_today_events[i].month == month &&
@@ -429,8 +466,8 @@ static void draw_left_panel(const weather_data_t *weather)
 
     // ═══ Weather tab ═══
     st7306_draw_filled_rect(0, py, PANEL_W, TAB_H, ST7306_COLOR_BLACK);
-    int tw = hzk16_text_width_14(gb_tianqi);
-    hzk16_draw_gb_text_14((PANEL_W - tw) / 2, py + 2, gb_tianqi, ST7306_COLOR_WHITE);
+    int tw = hzk16_text_width(gb_tianqi);
+    hzk16_draw_gb_text((PANEL_W - tw) / 2, py + 1, gb_tianqi, ST7306_COLOR_WHITE);
     py += TAB_H;
 
     int wc_top = py;
@@ -460,30 +497,36 @@ static void draw_left_panel(const weather_data_t *weather)
     // ═══ Events tab ═══
     py = wc_top + (cy - wc_top + 3) + 3;
     st7306_draw_filled_rect(0, py, PANEL_W, TAB_H, ST7306_COLOR_BLACK);
-    tw = hzk16_text_width_14(gb_jinri);
-    hzk16_draw_gb_text_14((PANEL_W - tw) / 2, py + 2, gb_jinri, ST7306_COLOR_WHITE);
+    tw = hzk16_text_width(gb_jinri);
+    hzk16_draw_gb_text((PANEL_W - tw) / 2, py + 1, gb_jinri, ST7306_COLOR_WHITE);
     py += TAB_H;
 
     cy = py + 3;
     int max_y = ST7306_HEIGHT - 4;
 
+    // Row layout: native 16×16 Chinese + 8×16 ASCII. 18 px row height (16 + 2 leading).
+    // Single line per event. Time/date prefix + 8 px gap (1 ASCII space) + title.
+    // PANEL_W=168 → title budget = 168 - 4 - 40 - 8 - 4 = 112 px = 7 Chinese chars max.
     if (s_today_count > 0) {
-        for (int i = 0; i < s_today_count && cy + 36 <= max_y; i++) {
-            // Line 1: ● HH:MM
+        for (int i = 0; i < s_today_count && cy + 18 <= max_y; i++) {
             int tx2 = px;
-            tx2 = hzk16_draw_gb_text(tx2, cy, gb_bullet, ST7306_COLOR_BLACK);
-            tx2 += 4;
-            char time_str[16];
-            snprintf(time_str, sizeof(time_str), "%02d:%02d",
-                     s_today_events[i].start_hour, s_today_events[i].start_min);
-            hzk16_draw_gb_text(tx2, cy, (const uint8_t *)time_str, ST7306_COLOR_BLACK);
+            if (s_today_events[i].start_hour < 0) {
+                // All-day event: render "全天" (GB2312: C8 AB CC EC)
+                static const uint8_t gb_allday[] = {0xC8, 0xAB, 0xCC, 0xEC, 0};
+                tx2 = hzk16_draw_gb_text(tx2, cy, gb_allday, ST7306_COLOR_BLACK);
+            } else {
+                char time_str[16];
+                snprintf(time_str, sizeof(time_str), "%02d:%02d",
+                         s_today_events[i].start_hour, s_today_events[i].start_min);
+                tx2 = hzk16_draw_gb_text(tx2, cy, (const uint8_t *)time_str,
+                                         ST7306_COLOR_BLACK);
+            }
+            tx2 += 8;  // 1 ASCII space equivalent
+            uint8_t trunc[64];
+            truncate_gb16(s_today_events[i].summary_gb,
+                          PANEL_W - tx2 - 4, trunc, sizeof(trunc));
+            hzk16_draw_gb_text(tx2, cy, trunc, ST7306_COLOR_BLACK);
             cy += 18;
-
-            // Line 2: indented title (16×16)
-            uint8_t truncated[64];
-            truncate_gb16(s_today_events[i].summary_gb, PANEL_W - px - 8, truncated, sizeof(truncated));
-            hzk16_draw_gb_text(px + 16, cy, truncated, ST7306_COLOR_BLACK);
-            cy += 20;
         }
     } else {
         hzk16_draw_gb_text(px, cy, gb_noevent, ST7306_COLOR_BLACK);
@@ -491,7 +534,7 @@ static void draw_left_panel(const weather_data_t *weather)
     }
 
     // Dashed separator between today and upcoming
-    if (s_upcoming_count > 0 && cy + 20 <= max_y) {
+    if (s_upcoming_count > 0 && cy + 22 <= max_y) {
         cy += 2;
         for (int dx = px; dx < PANEL_W - px; dx += 4) {
             st7306_set_pixel(dx, cy, ST7306_COLOR_BLACK);
@@ -501,19 +544,18 @@ static void draw_left_panel(const weather_data_t *weather)
     }
 
     if (s_upcoming_count > 0) {
-        for (int i = 0; i < s_upcoming_count && cy + 36 <= max_y; i++) {
-            // Line 1: MM/DD
+        for (int i = 0; i < s_upcoming_count && cy + 18 <= max_y; i++) {
             char date_str[16];
             snprintf(date_str, sizeof(date_str), "%02d/%02d",
                      s_upcoming_events[i].month, s_upcoming_events[i].day);
-            hzk16_draw_gb_text(px, cy, (const uint8_t *)date_str, ST7306_COLOR_BLACK);
-            cy += 18;
-
-            // Line 2: indented title (16×16)
+            int tx2 = hzk16_draw_gb_text(px, cy, (const uint8_t *)date_str,
+                                         ST7306_COLOR_BLACK);
+            tx2 += 8;
             uint8_t trunc[64];
-            truncate_gb16(s_upcoming_events[i].summary_gb, PANEL_W - px - 8, trunc, sizeof(trunc));
-            hzk16_draw_gb_text(px + 16, cy, trunc, ST7306_COLOR_BLACK);
-            cy += 20;
+            truncate_gb16(s_upcoming_events[i].summary_gb,
+                          PANEL_W - tx2 - 4, trunc, sizeof(trunc));
+            hzk16_draw_gb_text(tx2, cy, trunc, ST7306_COLOR_BLACK);
+            cy += 18;
         }
     }
 
@@ -838,6 +880,11 @@ void calendar_confirm_selection(void)
 void calendar_clear_selection(void)
 {
     s_has_selection = false;
+}
+
+bool calendar_has_selection(void)
+{
+    return s_has_selection;
 }
 
 // ── Status message screen ──────────────────────────────────────────────────────

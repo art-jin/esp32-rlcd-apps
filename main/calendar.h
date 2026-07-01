@@ -1,6 +1,7 @@
 #ifndef CALENDAR_H
 #define CALENDAR_H
 
+#include <stdbool.h>
 #include "weather.h"
 #include "caldav.h"
 #include <time.h>
@@ -84,5 +85,10 @@ void calendar_confirm_selection(void);
  * Clear the selection state (used when switching apps).
  */
 void calendar_clear_selection(void);
+
+/**
+ * Whether a non-today day is currently selected (cursor moved off today).
+ */
+bool calendar_has_selection(void);
 
 #endif // CALENDAR_H

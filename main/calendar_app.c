@@ -1,23 +1,37 @@
 /*
- * Calendar app: encapsulates the monthly calendar view + 3-key navigation.
- * Worker task handles 1Hz status bar refresh + periodic weather/CalDAV fetches.
- * on_key handles PREV/NEXT/ENTER day navigation; BACK returns to menu.
+ * Calendar app: monthly view + 3/4-key navigation.
+ *
+ * Worker task does 1Hz status-bar refresh + periodic data fetch + 60s SHTC3.
+ *
+ * Data source:
+ *   - Default: KinCal JSON endpoint via kincal_client + kincal_bridge.
+ *     Refresh interval comes from the server response (60s Pro/Biz, 300s Free).
+ *   - Escape hatch (CONFIG_KINCAL_LEGACY_DIRECT_APIS=y): direct CalDAV
+ *     (Feishu) + Open-Meteo calls. Kept compilable for offline / debug.
  */
 
 #include "calendar_app.h"
 #include "app_manager.h"
+#include "app_framework.h"
 #include "calendar.h"
-#include "weather.h"
-#include "caldav.h"
 #include "wifi_manager.h"
 #include "battery.h"
 #include "shtc3.h"
 #include "st7306.h"
+#include "keyboard.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include <time.h>
+
+#if CONFIG_KINCAL_LEGACY_DIRECT_APIS
+#include "weather.h"
+#include "caldav.h"
+#else
+#include "kincal_client.h"
+#include "kincal_bridge.h"
+#endif
 
 static const char *TAG = "CalendarApp";
 
@@ -33,11 +47,13 @@ static TaskHandle_t s_worker = NULL;
 
 // Periodic counters (persist across exits, reset on enter)
 static int s_last_day = -1;
+static int s_env_counter = 60;        // force first-loop SHTC3 read
+
+#if CONFIG_KINCAL_LEGACY_DIRECT_APIS
 static int s_weather_counter = 0;
 static int s_caldav_counter = 0;
-static int s_env_counter = 60;   // force first-loop SHTC3 read
 
-// Local helper (kept identical to old fetch_and_set_events in app_manager.c)
+// Legacy: direct CalDAV fetch from Feishu
 static void fetch_and_set_events(int year, int month, int day)
 {
     caldav_event_t events[CALDAV_MAX_EVENTS];
@@ -54,11 +70,37 @@ static void fetch_and_set_events(int year, int month, int day)
         ESP_LOGW(TAG, "CalDAV fetch failed, keeping previous events");
     }
 }
+#else
+// KinCal: single fetch covers weather + events + lunar + rest_days.
+static int s_kincal_counter = 0;
+static int s_kincal_refresh_seconds = 60;  // updated after first successful fetch
+static kincal_display_data_t s_kincal_data; // static so the 3 KB doesn't sit on stack
+
+static void fetch_and_apply_kincal(int year, int month, int day)
+{
+    ESP_LOGI(TAG, "Fetching KinCal...");
+    esp_err_t err = kincal_client_fetch(&s_kincal_data);
+    if (err == ESP_OK) {
+        s_kincal_refresh_seconds = kincal_client_next_refresh_seconds(&s_kincal_data);
+        kincal_bridge_apply(&s_kincal_data);
+        ESP_LOGI(TAG, "KinCal applied, refresh=%ds", s_kincal_refresh_seconds);
+    } else {
+        ESP_LOGW(TAG, "KinCal fetch failed: %s — keeping previous state",
+                 esp_err_to_name(err));
+    }
+}
+#endif
 
 static void calendar_worker(void *arg)
 {
     int sub_tick = 0;
     ESP_LOGI(TAG, "Worker started");
+
+    /* Watchdog note: sdkconfig.defaults disables
+     * CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1 because XiaoZhi audio
+     * pipeline + KinCal TLS handshake + ST7306 SPI redraw share CPU 1 and
+     * can starve IDLE below the 10s threshold. cal_work itself is never
+     * auto-subscribed to the WDT, so no esp_task_wdt_delete() needed here. */
 
     while (!s_stop_flag) {
         vTaskDelay(pdMS_TO_TICKS(100));  // 100ms granularity for responsive exit
@@ -91,7 +133,8 @@ static void calendar_worker(void *arg)
 
         app_manager_display_unlock();
 
-        // Weather refresh (every 10 min)
+#if CONFIG_KINCAL_LEGACY_DIRECT_APIS
+        // Legacy: weather refresh every 10 min
         if (++s_weather_counter >= 600) {
             s_weather_counter = 0;
             ESP_LOGI(TAG, "Fetching weather...");
@@ -103,12 +146,31 @@ static void calendar_worker(void *arg)
             }
         }
 
-        // CalDAV refresh (initial burst at counter=5, then every 10 min)
+        // Legacy: CalDAV refresh (initial burst at counter=5, then every 10 min)
         if (++s_caldav_counter >= 600 ||
             (s_caldav_counter == 5 && g_event_count == 0)) {
             s_caldav_counter = 0;
             fetch_and_set_events(y, m, d);
         }
+#else
+        // KinCal: unified fetch on dynamic interval.
+        // Initial burst at counter==3 (let WiFi/SNTP settle), then dynamic.
+        if (++s_kincal_counter >= s_kincal_refresh_seconds ||
+            (s_kincal_counter == 3 && g_event_count == 0)) {
+            s_kincal_counter = 0;
+            fetch_and_apply_kincal(y, m, d);
+            // Reflect the new state on screen immediately.
+            app_manager_display_lock();
+            calendar_draw_with_weather(y, m, d, &g_weather);
+            if (g_event_count > 0) {
+                calendar_set_events(g_events, g_event_count, y, m, d, &g_weather);
+            }
+            calendar_draw_status_bar(&ti, wifi_manager_get_rssi(),
+                                     battery_get_level());
+            st7306_update_display();
+            app_manager_display_unlock();
+        }
+#endif
 
         // SHTC3 indoor temp/humidity every 60s
         if (++s_env_counter >= 60) {
@@ -142,9 +204,14 @@ void calendar_on_enter(void)
 
     // Reset periodic counters (forces immediate refresh on entry)
     s_last_day = -1;
+    s_env_counter = 60;
+#if CONFIG_KINCAL_LEGACY_DIRECT_APIS
     s_weather_counter = 599;
     s_caldav_counter = 0;
-    s_env_counter = 60;
+#else
+    s_kincal_counter = 0;
+    // First fetch will happen at counter==3 (≈3s after entry)
+#endif
 
     // Initial full draw
     time_t now;

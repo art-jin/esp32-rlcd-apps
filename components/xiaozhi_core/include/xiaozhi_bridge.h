@@ -1,6 +1,7 @@
 #ifndef XIAOZHI_BRIDGE_H
 #define XIAOZHI_BRIDGE_H
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus

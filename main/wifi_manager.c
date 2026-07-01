@@ -5,6 +5,7 @@
 
 #include "wifi_manager.h"
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -22,8 +23,14 @@ static const char *TAG = "wifi_mgr";
 
 // ── NVS keys ───────────────────────────────────────────────────────────────────
 #define NVS_NAMESPACE "wifi_creds"
-#define NVS_KEY_SSID  "ssid"
-#define NVS_KEY_PASS  "password"
+#define NVS_KEY_SSID       "ssid"
+#define NVS_KEY_PASS       "password"
+#define NVS_KEY_KINCAL     "kincal_code"   // 6-char short code
+#define NVS_KEY_HAS_BACK   "has_back_key"  // u8 bool
+
+// Valid characters for KinCal short codes (no ambiguous chars: 0/O, 1/I).
+#define KINCAL_CODE_ALPHABET "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+#define KINCAL_CODE_LEN      6
 
 // ── AP config ──────────────────────────────────────────────────────────────────
 #define AP_PASS       "12345678"
@@ -107,11 +114,18 @@ static const char *CONFIG_HTML =
 "<style>body{font-family:sans-serif;max-width:400px;margin:40px auto;padding:0 20px}"
 "h1{color:#333}input{width:100%;padding:8px;margin:8px 0;box-sizing:border-box}"
 "button{width:100%;padding:12px;background:#007bff;color:#fff;border:none;font-size:16px}"
+"small{color:#666}"
 "</style></head><body>"
 "<h1>WiFi &#37197;&#32622;</h1>"  /* WiFi 配置 */
 "<form method=\"POST\" action=\"/save\">"
 "<p>WiFi&#21517;&#31216;: <input name=\"ssid\" required></p>"  /* 名称 */
 "<p>&#23494;&#30721;: <input name=\"pass\" type=\"password\"></p>"  /* 密码 */
+"<p>KinCal&#30701;&#30721;: <input name=\"kcode\" maxlength=\"6\""
+" pattern=\"[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{6}\""
+" placeholder=\"ABC234\" style=\"text-transform:uppercase\"></p>"
+"<small>&#30041;&#31354;&#36339;&#36807; KinCal&#37197;&#23545;&#65288;&#20165;WiFi&#27169;&#24335;&#65289;</small><br>"
+"<label><input type=\"checkbox\" name=\"backkey\" value=\"1\">"
+"&#25105;&#26377;4&#38190;&#30828;&#20214;&#65288;GPIO43 BACK&#25353;&#38190;&#65289;</label>"
 "<button type=\"submit\">&#20445;&#23384;&#24182;&#36830;&#25509;</button>"  /* 保存并连接 */
 "</form></body></html>";
 
@@ -122,9 +136,49 @@ static esp_err_t config_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Extract one form field from a urlencoded body. Finds "name=..." up to next
+// '&' or end-of-string, URL-decodes into `out`. Returns field length or 0 if
+// not found / empty.
+static int extract_field(const char *body, const char *name,
+                         char *out, size_t out_len)
+{
+    size_t nlen = strlen(name);
+    const char *p = body;
+    while ((p = strstr(p, name)) != NULL) {
+        // Ensure match is at field boundary (start of body or preceded by '&')
+        if (p != body && p[-1] != '&') {
+            p += nlen;
+            continue;
+        }
+        p += nlen;
+        if (*p != '=') continue;
+        p++;  // skip '='
+        const char *end = strchr(p, '&');
+        size_t raw_len = end ? (size_t)(end - p) : strlen(p);
+        char tmp[128];
+        if (raw_len >= sizeof(tmp)) raw_len = sizeof(tmp) - 1;
+        memcpy(tmp, p, raw_len);
+        tmp[raw_len] = '\0';
+        return url_decode(tmp, out, (int)out_len);
+    }
+    out[0] = '\0';
+    return 0;
+}
+
+// Validate a KinCal short code: exactly 6 chars from the unambiguous alphabet.
+static bool kincal_code_valid(const char *code)
+{
+    if (strlen(code) != KINCAL_CODE_LEN) return false;
+    for (int i = 0; i < KINCAL_CODE_LEN; i++) {
+        if (strchr(KINCAL_CODE_ALPHABET, code[i]) == NULL) return false;
+    }
+    return true;
+}
+
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    char buf[256];
+    // 4 fields × ~80 chars max each — 512 is plenty.
+    char buf[512];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Read failed");
@@ -132,38 +186,43 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     }
     buf[ret] = '\0';
 
-    // Parse ssid=...&pass=...
     char ssid[64] = {0}, pass[64] = {0};
-    char *p = strstr(buf, "ssid=");
-    if (p) {
-        p += 5;
-        char *end = strchr(p, '&');
-        if (end) {
-            char tmp[64];
-            int len = (int)(end - p);
-            if (len >= (int)sizeof(tmp)) len = sizeof(tmp) - 1;
-            memcpy(tmp, p, len);
-            tmp[len] = '\0';
-            url_decode(tmp, ssid, sizeof(ssid));
-        }
-    }
-    p = strstr(buf, "pass=");
-    if (p) {
-        p += 5;
-        char tmp[64];
-        strncpy(tmp, p, sizeof(tmp) - 1);
-        tmp[sizeof(tmp) - 1] = '\0';
-        url_decode(tmp, pass, sizeof(pass));
-    }
+    char kcode[16] = {0}, backkey[8] = {0};
+    extract_field(buf, "ssid",   ssid,   sizeof(ssid));
+    extract_field(buf, "pass",   pass,   sizeof(pass));
+    extract_field(buf, "kcode",  kcode,  sizeof(kcode));
+    extract_field(buf, "backkey", backkey, sizeof(backkey));
 
-    ESP_LOGI(TAG, "Received SSID=%s", ssid);
+    // Uppercase kcode (browser may submit lowercase despite pattern attr).
+    for (char *q = kcode; *q; q++) *q = toupper((unsigned char)*q);
+
+    ESP_LOGI(TAG, "Received SSID=%s kcode=%s backkey=%s", ssid, kcode, backkey);
 
     if (strlen(ssid) == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty SSID");
         return ESP_FAIL;
     }
+    // kcode is optional — empty means "skip KinCal pairing, WiFi only".
+    if (kcode[0] != '\0' && !kincal_code_valid(kcode)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+            "Invalid KinCal code (need 6 chars A-Z 2-9, no O/I/0/1)");
+        return ESP_FAIL;
+    }
 
-    wifi_manager_save_credentials(ssid, pass);
+    // Persist all four fields in one NVS commit.
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, NVS_KEY_SSID, ssid);
+        nvs_set_str(h, NVS_KEY_PASS, pass);
+        nvs_set_str(h, NVS_KEY_KINCAL, kcode);  // empty string is fine
+        uint8_t has_back = (backkey[0] == '1') ? 1 : 0;
+        nvs_set_u8(h, NVS_KEY_HAS_BACK, has_back);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "Saved: SSID=%s kcode=%s has_back=%d", ssid, kcode, has_back);
+    } else {
+        ESP_LOGE(TAG, "NVS open failed for save");
+    }
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req,
@@ -356,4 +415,28 @@ bool wifi_manager_get_time(struct tm *timeinfo)
 
     esp_netif_sntp_deinit();
     return true;
+}
+
+// ── KinCal code + 4-key NVS getters ───────────────────────────────────────────
+esp_err_t wifi_manager_load_kincal_code(char *out, size_t len)
+{
+    if (len == 0) return ESP_ERR_INVALID_ARG;
+    out[0] = '\0';
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) return err;
+    size_t required = len;
+    err = nvs_get_str(h, NVS_KEY_KINCAL, out, &required);
+    nvs_close(h);
+    return err;
+}
+
+bool wifi_manager_load_has_back_key(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t val = 0;
+    nvs_get_u8(h, NVS_KEY_HAS_BACK, &val);
+    nvs_close(h);
+    return val != 0;
 }

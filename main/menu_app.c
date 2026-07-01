@@ -24,13 +24,23 @@ static const char *TAG = "Menu";
 #define MENU_BOX_X        40
 #define MENU_BOX_W        (ST7306_WIDTH - MENU_BOX_X * 2)
 
-// Apps displayed in menu (skip APP_ID_MENU itself)
+// Apps displayed in menu (skip APP_ID_MENU itself).
+// Conditional entries are omitted when their Kconfig flag is off — the menu
+// naturally shrinks to just Calendar in the KinCal-only factory firmware.
 static const app_id_t s_menu_items[] = {
     APP_ID_CALENDAR,
+#if CONFIG_KINCAL_APP_XIAOZHI
     APP_ID_XIAOZHI,
+#endif
+#if CONFIG_KINCAL_APP_CODEPILOT
     APP_ID_CODEPILOT,
+#endif
+#if CONFIG_KINCAL_APP_SNAKE
     APP_ID_SNAKE,
+#endif
+#if CONFIG_KINCAL_APP_TETRIS
     APP_ID_TETRIS,
+#endif
 };
 #define MENU_ITEM_COUNT (sizeof(s_menu_items) / sizeof(s_menu_items[0]))
 

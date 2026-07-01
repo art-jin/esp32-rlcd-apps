@@ -32,4 +32,18 @@ const char *wifi_manager_get_ap_ssid(void);
  */
 int wifi_manager_get_rssi(void);
 
+/**
+ * Load the KinCal 6-char short code from NVS into `out`.
+ * Returns ESP_OK and zero-terminated string in `out` on success,
+ * ESP_ERR_NVS_NOT_FOUND if never provisioned. Empty string also possible
+ * if user submitted the form with the field blank.
+ */
+esp_err_t wifi_manager_load_kincal_code(char *out, size_t len);
+
+/**
+ * Whether the device has the 4th physical key (BACK on GPIO43).
+ * Reads NVS at call time. Returns false if not provisioned.
+ */
+bool wifi_manager_load_has_back_key(void);
+
 #endif // WIFI_MANAGER_H

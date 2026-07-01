@@ -41,6 +41,12 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 
 # Watchdog
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+# XiaoZhi audio pipeline + KinCal TLS handshake + ST7306 SPI redraw are
+# CPU-heavy and share CPU 1. Don't subscribe IDLE tasks to the WDT —
+# individual worker tasks manage their own yields via vTaskDelay and
+# are unsubscribed from the WDT themselves where appropriate.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 
 # Console output via USB Serial/JTAG (frees GPIO43/44 from UART0)
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

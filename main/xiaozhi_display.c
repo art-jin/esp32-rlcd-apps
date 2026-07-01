@@ -11,7 +11,9 @@
 #include "app_manager.h"
 #include "app_framework.h"
 #include "xiaozhi_app_display.h"
+#if CONFIG_KINCAL_APP_CODEPILOT
 #include "codepilot_app.h"  // for STT intercept when CodePilot active
+#endif
 #include "st7306.h"
 
 #include "freertos/task.h"
@@ -81,10 +83,12 @@ void xiaozhi_on_text(const char *text)
     // STT intercept: when CodePilot is active, divert text to its input area
     // instead of the XiaoZhi chat display. This captures both user speech
     // (STT) and AI responses — both are visible to the user in CodePilot.
+#if CONFIG_KINCAL_APP_CODEPILOT
     if (app_manager_current() == APP_ID_CODEPILOT) {
         codepilot_receive_stt(text);
         return;
     }
+#endif
     if (app_manager_current() != APP_ID_XIAOZHI) return;
     ensure_init();
 

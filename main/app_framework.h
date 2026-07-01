@@ -36,4 +36,11 @@ typedef struct {
 const app_t *app_registry_get(app_id_t id);
 const app_t *app_registry_all(void);   // APP_ID_COUNT entries
 
+/**
+ * Number of enabled apps (excluding APP_ID_MENU itself). Used to decide
+ * whether BACK should return to the menu or do something app-local.
+ * Returns 0 in KinCal factory firmware where Calendar is the only visible app.
+ */
+int app_registry_count_enabled(void);
+
 #endif // APP_FRAMEWORK_H

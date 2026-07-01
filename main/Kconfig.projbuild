@@ -1,0 +1,74 @@
+menu "KinCal Integration"
+    config KINCAL_HOST
+        string "KinCal server host"
+        default "kincal.cn"
+        help
+            Hostname the firmware contacts to fetch device display data.
+            Override for local dev (e.g. 192.168.1.42).
+
+    config KINCAL_USE_HTTPS
+        bool "Use HTTPS"
+        default y
+        help
+            Toggle HTTPS (port 443) vs HTTP (port 80).
+
+    config KINCAL_SKIP_CERT_VERIFY
+        bool "Skip TLS certificate verification (dev only)"
+        default n
+        help
+            DANGER: skips server certificate validation. Use only against
+            a local dev server with a self-signed cert. Must never be y
+            in production firmware.
+
+    config KINCAL_DEFAULT_SHORT_CODE
+        string "Default KinCal short code (factory provisioning)"
+        default ""
+        help
+            Pre-provisioned 6-char short code baked into the factory firmware.
+            Empty means the user must configure via the AP captive portal.
+            NVS value (if set at runtime) takes precedence over this default.
+
+    config KINCAL_DEFAULT_HAS_BACK_KEY
+        bool "Default 4-key hardware (BACK button on GPIO43 present)"
+        default n
+        help
+            Factory default for whether the device has the 4th physical key.
+            Original Waveshare RLCD has only 3 keys (PREV/NEXT/ENTER) — leave n.
+            NVS value (set via captive portal) takes precedence over this default.
+
+    config KINCAL_LEGACY_DIRECT_APIS
+        bool "Compile legacy direct CalDAV/Open-Meteo clients"
+        default n
+        help
+            Escape hatch: keeps caldav.c / weather.c / their fetch calls
+            compilable so the firmware can run without KinCal. Default off
+            — once KinCal integration is stable, leave this off and the
+            legacy sources are excluded from the build.
+endmenu
+
+menu "Enabled Apps"
+    config KINCAL_APP_XIAOZHI
+        bool "Enable XiaoZhi voice assistant app"
+        default n
+        help
+            Phase B app. Off by default for KinCal-only firmware;
+            toggle on for the multi-app firmware variant.
+
+    config KINCAL_APP_CODEPILOT
+        bool "Enable CodePilot agent dashboard app"
+        default n
+        help
+            Phase B app. Off by default for KinCal-only firmware.
+
+    config KINCAL_APP_SNAKE
+        bool "Enable Snake game"
+        default n
+        help
+            Phase C game. Off by default for KinCal-only firmware.
+
+    config KINCAL_APP_TETRIS
+        bool "Enable Tetris game"
+        default n
+        help
+            Phase D game. Off by default for KinCal-only firmware.
+endmenu

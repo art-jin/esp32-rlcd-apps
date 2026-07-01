@@ -1,6 +1,13 @@
 /*
- * ESP32-S3-RLCD-4.2 Monthly Calendar Display + XiaoZhi AI Voice Assistant
- * App manager switches between Calendar and XiaoZhi via KEY button (GPIO 18).
+ * ESP32-S3-RLCD-4.2 entry point.
+ *
+ * Default data source: KinCal JSON endpoint (`/api/v1/esp32/display/{code}`).
+ * The short code is loaded from NVS (provisioned via AP captive portal).
+ * If the code is missing, the calendar worker falls back to local static
+ * holiday/lunar data and retries KinCal every 60 s.
+ *
+ * Escape hatch: `CONFIG_KINCAL_LEGACY_DIRECT_APIS=y` re-enables the old
+ * direct Feishu CalDAV + Open-Meteo paths.
  */
 
 #include <stdio.h>
@@ -13,22 +20,27 @@
 #include "calendar.h"
 #include "wifi_manager.h"
 #include "battery.h"
-#include "weather.h"
-#include "caldav.h"
 #include "xiaozhi_bridge.h"
 #include "shtc3.h"
 #include "app_manager.h"
+
+#if CONFIG_KINCAL_LEGACY_DIRECT_APIS
+#include "weather.h"
+#include "caldav.h"
+#else
+#include "kincal_client.h"
+#endif
 
 // Forward declarations for XiaoZhi display callbacks (xiaozhi_display.c)
 extern void xiaozhi_on_text(const char *text);
 extern void xiaozhi_on_state(xiaozhi_state_t state);
 
-// Shared data (accessible by update_task in app_manager.c)
+// Shared data (accessible by calendar_app worker)
 weather_data_t g_weather = {
     .temperature = 25,
     .humidity = 55,
     .weather_code = 2,
-    .description = (const uint8_t *)"\xB6\xE0\xD4\xC6\x00",  // 多云 (default)
+    .description = (const uint8_t *)"\xB6\xE2\xD4\xC6\x00",  // 多云 (default)
 };
 
 caldav_event_t g_events[CALDAV_MAX_EVENTS];
@@ -41,7 +53,7 @@ void app_main(void)
     ESP_ERROR_CHECK(st7306_init());
     ESP_ERROR_CHECK(hzk16_init());
 
-    // Init NVS (required for WiFi credentials)
+    // Init NVS (required for WiFi credentials + KinCal short code)
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
@@ -88,13 +100,24 @@ void app_main(void)
     // Initialize battery ADC
     battery_init();
 
-    // Fetch initial weather
-    printf("Fetching weather...\n");
+#if CONFIG_KINCAL_LEGACY_DIRECT_APIS
+    // Legacy: fetch weather up front (calendar_app worker continues every 10 min)
+    printf("Fetching weather (legacy)...\n");
     if (weather_fetch(&g_weather) == ESP_OK) {
         printf("Weather: %.1f C, %d%% humidity\n", g_weather.temperature, g_weather.humidity);
     } else {
         printf("Weather fetch failed, using defaults.\n");
     }
+#else
+    // KinCal: cache short code from NVS. If not provisioned, calendar_app
+    // worker will retry every 60 s and fall back to local lunar/holiday data.
+    kincal_client_init();
+    if (!kincal_client_is_provisioned()) {
+        printf("KinCal short code not set — running in fallback mode.\n");
+        calendar_draw_status("KinCal unpaired", "Re-run AP portal");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
+#endif
 
     // Initialize XiaoZhi hardware upfront so I2C bus is available for SHTC3.
     // xiaozhi_init() is idempotent; later xiaozhi_app.on_enter will be a no-op.
@@ -116,3 +139,4 @@ void app_main(void)
 
     printf("Calendar rendered. App manager running.\n");
 }
+
