@@ -26,7 +26,7 @@ static const uint8_t nm_calendar[] = {0xC8, 0xD5, 0xC0, 0xFA, 0};               
 static const uint8_t nm_xiaozhi[]  = {0xD0, 0xA1, 0xD6, 0xC7, 0};                    // 小智
 #endif
 #if CONFIG_KINCAL_APP_CODEPILOT
-static const char    nm_codepilot[] = "CodePilot";
+static const char    nm_codepilot[] = "Code Pilot";
 #endif
 #if CONFIG_KINCAL_APP_SNAKE
 static const uint8_t nm_snake[]    = {0xCC, 0xB0, 0xB3, 0xD4, 0xC9, 0xDF, 0};        // 贪吃蛇

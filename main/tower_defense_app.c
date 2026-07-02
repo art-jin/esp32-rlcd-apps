@@ -46,10 +46,10 @@ static const char *TAG = "TD";
 #define TD_LIVES_START          3
 #define TD_BREACH_RADIUS_SQ  (16 * 16)   // enemy reaches turret, dist² < this
 #define TD_HIT_RADIUS_SQ     (10 * 10)   // bullet hits enemy, dist² < this
-#define TD_BULLET_LIFE         60         // ticks (3s @ 20Hz)
-#define TD_BULLET_SPEED         4         // px/tick (dir16 magnitude is ~4)
-#define TD_FIRE_COOLDOWN        8         // ticks between shots (~400ms)
-#define TD_WAVE_PREP_TICKS     60         // 3s between waves
+#define TD_BULLET_LIFE         50         // ticks (~2.5s @ 20Hz)
+#define TD_BULLET_SPEED         6         // px/tick (was 4 — felt sluggish)
+#define TD_FIRE_COOLDOWN        6         // ticks between shots (~300ms)
+#define TD_WAVE_PREP_TICKS     40         // 2s between waves (was 3s)
 
 // 16-step direction table (magnitude ~4). 0=up, 4=right, 8=down, 12=left
 static const int8_t dir16_x[16] = {
@@ -166,7 +166,8 @@ static void spawn_enemy(void) {
     if (s_wave >= 7 && r < 20) type = TD_TANKY;
     else if (s_wave >= 4 && r < 40) type = TD_FAST;
 
-    int speed = (type == TD_FAST) ? 2 : 1;
+    int speed = (type == TD_TANKY) ? 1 :
+                (type == TD_FAST)  ? 3 : 2;
     int hp    = (type == TD_TANKY) ? 3 : 1;
 
     // Velocity = direction-to-center × speed
@@ -220,8 +221,8 @@ static void step_game(void) {
         } else {
             spawn_enemy();
             s_wave_spawned++;
-            int interval = 40 - s_wave * 4;
-            if (interval < 16) interval = 16;
+            int interval = 30 - s_wave * 3;
+            if (interval < 12) interval = 12;
             s_ticks_to_spawn = interval;
         }
     } else if (count_active_enemies() == 0) {
