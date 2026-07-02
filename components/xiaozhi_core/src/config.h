@@ -48,7 +48,11 @@
 // Task parameters
 #define XZ_AUDIO_INPUT_STACK   4096
 #define XZ_AUDIO_INPUT_PRIO    8
-#define XZ_AUDIO_OUTPUT_STACK  4096
+// Was 4096 — too small for the esp_codec_dev_write → ES8311 → I2S chain.
+// Stack-overflow canary tripped immediately after task start when the
+// pipeline came up under CodePilot's long-press STT path. 8 KB matches
+// the headroom the upstream xiaozhi-esp32 project reserves here.
+#define XZ_AUDIO_OUTPUT_STACK  8192
 #define XZ_AUDIO_OUTPUT_PRIO   4
 #define XZ_OPUS_CODEC_STACK    32768
 #define XZ_OPUS_CODEC_PRIO     2
