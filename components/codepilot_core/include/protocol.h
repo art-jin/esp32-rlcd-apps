@@ -65,6 +65,9 @@ typedef enum {
     BRIDGE_MSG_QUOTA_UPDATE,
     BRIDGE_MSG_TIME_SYNC,
     BRIDGE_MSG_PING,
+    // bridge_usb.js JSON side-channel:
+    BRIDGE_MSG_QUOTA_WINDOWS,    // {"type":"quota_windows","q5","q24","q7"}
+    BRIDGE_MSG_PERMISSION_CLEAR, // {"type":"permission_clear"}
     BRIDGE_MSG_COUNT
 } bridge_msg_type_t;
 
@@ -94,6 +97,14 @@ typedef struct {
     uint32_t quota_used;
     uint32_t quota_total;
     bool online;               // false if heartbeat stale > 30s
+    // Fields populated by bridge_usb.js compact format (1CC<task>|Q..|P..|..).
+    // Additive — older JSON-only callers leave these at 0.
+    char     project[32];           // e.g. "esp32-rlcd-ap"
+    uint32_t cost_cents;            // total session cost in cents
+    uint32_t rate_cents_per_hour;   // burn rate, cents per hour
+    uint32_t lines_added;
+    uint32_t lines_removed;
+    uint16_t session_minutes;
 } agent_state_t;
 
 // Notification
@@ -113,6 +124,13 @@ typedef struct {
     notification_t notifications[MAX_NOTIFICATIONS];
     uint8_t notification_count;
     uint32_t timestamp;
+    // From bridge_usb.js JSON side-channel:
+    //   {"type":"quota_windows","q5":N,"q24":N,"q7":N}
+    //   {"type":"permission_clear"}
+    struct {
+        uint8_t q5, q24, q7;
+    } quota_windows;
+    bool permission_alert;  // set by notification, cleared by permission_clear
 } global_state_t;
 
 // Device info

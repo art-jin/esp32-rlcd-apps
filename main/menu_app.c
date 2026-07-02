@@ -30,11 +30,11 @@ static const char *TAG = "Menu";
 // naturally shrinks to just Calendar in the KinCal-only factory firmware.
 static const app_id_t s_menu_items[] = {
     APP_ID_CALENDAR,
-#if CONFIG_KINCAL_APP_XIAOZHI
-    APP_ID_XIAOZHI,
-#endif
 #if CONFIG_KINCAL_APP_CODEPILOT
     APP_ID_CODEPILOT,
+#endif
+#if CONFIG_KINCAL_APP_XIAOZHI
+    APP_ID_XIAOZHI,
 #endif
 #if CONFIG_KINCAL_APP_SNAKE
     APP_ID_SNAKE,

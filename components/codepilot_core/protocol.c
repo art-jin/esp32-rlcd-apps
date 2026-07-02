@@ -1,6 +1,8 @@
 #include "protocol.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <esp_mac.h>
@@ -16,9 +18,12 @@ static bool protocol_process_session_end(const cJSON* msg, global_state_t* state
 static bool protocol_process_notification(const cJSON* msg, global_state_t* state);
 static bool protocol_process_notification_clear(const cJSON* msg, global_state_t* state);
 static bool protocol_process_quota_update(const cJSON* msg, global_state_t* state);
+static bool protocol_process_quota_windows(const cJSON* msg, global_state_t* state);
+static bool protocol_process_permission_clear(global_state_t* state);
 static bool protocol_process_time_sync(const cJSON* msg, global_state_t* state);
 static void protocol_parse_session(const cJSON* session_obj, session_t* session);
 static void protocol_parse_notification(const cJSON* notif_obj, notification_t* notification);
+static bool protocol_parse_compact(const char* line, global_state_t* state);
 
 // Initialize global state
 void protocol_init_global_state(global_state_t* state) {
@@ -173,6 +178,12 @@ bool protocol_parse_message(const char* json_str, bridge_msg_type_t* type, cJSON
     } else if (strcasecmp(type_str, "ping") == 0 ||
                strcasecmp(type_str, "heartbeat") == 0) {
         *type = BRIDGE_MSG_PING;
+    } else if (strcasecmp(type_str, "quota_windows") == 0) {
+        // bridge_usb.js: {"type":"quota_windows","q5":N,"q24":N,"q7":N}
+        *type = BRIDGE_MSG_QUOTA_WINDOWS;
+    } else if (strcasecmp(type_str, "permission_clear") == 0) {
+        // bridge_usb.js: {"type":"permission_clear"}
+        *type = BRIDGE_MSG_PERMISSION_CLEAR;
     } else {
         // Unknown type: be lenient, just ignore (treat as ping)
         *type = BRIDGE_MSG_PING;
@@ -292,14 +303,27 @@ char* protocol_encode_button(const button_event_t* event) {
     return json_str;
 }
 
-// Process bridge message and update state
-bool protocol_process_bridge_message(const char* json_str, global_state_t* state) {
-    if (!json_str || !state) return false;
+// Process bridge message and update state.
+// Accepts both formats emitted by the bridge family:
+//   - JSON    : line starts with '{' → existing path (bridge.js legacy)
+//   - compact : line starts with '0'/'1' → bridge_usb.js short format
+bool protocol_process_bridge_message(const char* line, global_state_t* state) {
+    if (!line || !state) return false;
 
+    // Skip leading whitespace
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line == '\0') return false;
+
+    // bridge_usb.js compact format: "1CC<task>|Q..|P..|C..|R..|L..,..|T.."
+    if (*line == '0' || *line == '1') {
+        return protocol_parse_compact(line, state);
+    }
+
+    // Otherwise treat as JSON
     bridge_msg_type_t type;
     cJSON* root = NULL;
 
-    if (!protocol_parse_message(json_str, &type, &root)) {
+    if (!protocol_parse_message(line, &type, &root)) {
         return false;
     }
 
@@ -307,43 +331,43 @@ bool protocol_process_bridge_message(const char* json_str, global_state_t* state
 
     switch (type) {
         case BRIDGE_MSG_STATE:
-            // Full state update
             success = protocol_process_state_message(root, state);
             break;
 
         case BRIDGE_MSG_SESSION_UPDATE:
-            // Partial session update
             success = protocol_process_session_update(root, state);
             break;
 
         case BRIDGE_MSG_SESSION_END:
-            // Session ended
             success = protocol_process_session_end(root, state);
             break;
 
         case BRIDGE_MSG_NOTIFICATION:
-            // New notification
             success = protocol_process_notification(root, state);
             break;
 
         case BRIDGE_MSG_NOTIFICATION_CLEAR:
-            // Clear notification
             success = protocol_process_notification_clear(root, state);
             break;
 
         case BRIDGE_MSG_QUOTA_UPDATE:
-            // Quota update
             success = protocol_process_quota_update(root, state);
             break;
 
+        case BRIDGE_MSG_QUOTA_WINDOWS:
+            success = protocol_process_quota_windows(root, state);
+            break;
+
+        case BRIDGE_MSG_PERMISSION_CLEAR:
+            success = protocol_process_permission_clear(state);
+            break;
+
         case BRIDGE_MSG_TIME_SYNC:
-            // Time sync
             success = protocol_process_time_sync(root, state);
             break;
 
         case BRIDGE_MSG_PING:
-            // Ping - respond with pong
-            // Handled by WebSocket server
+            // Ping - respond with pong (handled by WebSocket server)
             break;
 
         default:
@@ -539,7 +563,137 @@ static bool protocol_process_quota_update(const cJSON* msg, global_state_t* stat
     return true;
 }
 
+// {"type":"quota_windows","q5":N,"q24":N,"q7":N} from bridge_usb.js
+static bool protocol_process_quota_windows(const cJSON* msg, global_state_t* state) {
+    const cJSON* q5  = cJSON_GetObjectItem(msg, "q5");
+    const cJSON* q24 = cJSON_GetObjectItem(msg, "q24");
+    const cJSON* q7  = cJSON_GetObjectItem(msg, "q7");
+    if (q5 && cJSON_IsNumber(q5))  state->quota_windows.q5  = (uint8_t)q5->valueint;
+    if (q24 && cJSON_IsNumber(q24)) state->quota_windows.q24 = (uint8_t)q24->valueint;
+    if (q7 && cJSON_IsNumber(q7))  state->quota_windows.q7  = (uint8_t)q7->valueint;
+    return true;
+}
+
+// {"type":"permission_clear"} — bridge_usb.js after user grants permission in Claude Code
+static bool protocol_process_permission_clear(global_state_t* state) {
+    state->permission_alert = false;
+    return true;
+}
+
 static bool protocol_process_time_sync(const cJSON* msg, global_state_t* state) {
     // Implementation for time sync
+    return true;
+}
+
+// ── bridge_usb.js compact format ─────────────────────────────────────────────
+// Wire shape (see ESP32_screen/bridge/bridge_usb.js:79 toShortMessage):
+//   {active '0'/'1'}{status 'C'/'I'}{name[0]}{task≤20}|Q{0-100}|P{project≤12}|C{cents}|R{cents/h}|L{+lines},{-lines}|T{minutes}\n
+// 'task' has '|' replaced with '!' upstream. Fields may be missing if the
+// bridge hasn't filled them yet — leave the previous value alone in that case.
+//
+// Example:  1CCesp32-rlcd-apps!!|Q43|Pesp32-rlcd-ap|C4319|R55|L3344,784|T777
+static bool protocol_parse_compact(const char* line, global_state_t* state) {
+    // Min length: 3 prefix chars + at least 1 task char = 4
+    if (strlen(line) < 4) return false;
+
+    const char active_ch  = line[0];
+    const char status_ch  = line[1];
+    const char name_ch    = line[2];
+
+    if (active_ch != '0' && active_ch != '1') return false;
+    if (status_ch != 'C' && status_ch != 'I') return false;
+
+    // Map name[0] → agent type. Bridge currently emits only 'C' (Claude).
+    // Unknown initials route to GENERIC.
+    agent_type_t type = AGENT_TYPE_GENERIC;
+    switch (name_ch) {
+        case 'C': type = AGENT_TYPE_CLAUDE; break;
+        case 'K': type = AGENT_TYPE_KIMI; break;
+        default: break;
+    }
+
+    // Find-or-create agent slot (mirrors protocol_process_session_update)
+    agent_state_t* agent = NULL;
+    for (uint8_t i = 0; i < state->agent_count; i++) {
+        if (state->agents[i].type == type) {
+            agent = &state->agents[i];
+            break;
+        }
+    }
+    if (!agent) {
+        if (state->agent_count >= MAX_AGENTS) return false;
+        agent = &state->agents[state->agent_count++];
+        memset(agent, 0, sizeof(*agent));
+        agent->type = type;
+    }
+
+    agent->active = (active_ch == '1');
+    snprintf(agent->status, sizeof(agent->status), "%s",
+             (status_ch == 'C') ? "Connected" : "Idle");
+
+    // Task is the substring [3 .. first '|')
+    const char* task_start = line + 3;
+    const char* pipe = strchr(task_start, '|');
+    if (!pipe) {
+        // No pipe = no other fields; just task
+        size_t tlen = strlen(task_start);
+        if (tlen >= sizeof(agent->current_task)) tlen = sizeof(agent->current_task) - 1;
+        memcpy(agent->current_task, task_start, tlen);
+        agent->current_task[tlen] = '\0';
+        agent->online = true;
+        return true;
+    }
+
+    size_t tlen = (size_t)(pipe - task_start);
+    if (tlen >= sizeof(agent->current_task)) tlen = sizeof(agent->current_task) - 1;
+    memcpy(agent->current_task, task_start, tlen);
+    agent->current_task[tlen] = '\0';
+
+    // Parse the |X<value> tokens by single-char tag
+    const char* p = pipe;
+    while (p && *p == '|') {
+        char tag = p[1];
+        const char* val = p + 2;
+        // Find next '|' to bound the value
+        const char* next_pipe = strchr(val, '|');
+        size_t vlen = next_pipe ? (size_t)(next_pipe - val) : strlen(val);
+
+        char vbuf[32];
+        if (vlen >= sizeof(vbuf)) vlen = sizeof(vbuf) - 1;
+        memcpy(vbuf, val, vlen);
+        vbuf[vlen] = '\0';
+
+        switch (tag) {
+            case 'Q': agent->quota_used  = (uint32_t)atoi(vbuf);
+                      agent->quota_total = 100;             // it's a percentage
+                      break;
+            case 'P': {
+                size_t pl = strlen(vbuf);
+                if (pl >= sizeof(agent->project)) pl = sizeof(agent->project) - 1;
+                memcpy(agent->project, vbuf, pl);
+                agent->project[pl] = '\0';
+                break;
+            }
+            case 'C': agent->cost_cents          = (uint32_t)strtoul(vbuf, NULL, 10); break;
+            case 'R': agent->rate_cents_per_hour = (uint32_t)strtoul(vbuf, NULL, 10); break;
+            case 'L': {
+                // L<added>,<removed>
+                char* comma = strchr(vbuf, ',');
+                if (comma) {
+                    *comma = '\0';
+                    agent->lines_added   = (uint32_t)strtoul(vbuf,   NULL, 10);
+                    agent->lines_removed = (uint32_t)strtoul(comma+1, NULL, 10);
+                }
+                break;
+            }
+            case 'T': agent->session_minutes     = (uint16_t)strtoul(vbuf, NULL, 10); break;
+            default: break;  // unknown tag — skip silently
+        }
+
+        p = next_pipe;
+    }
+
+    agent->online = true;
+    agent->last_update = state->timestamp = (uint32_t)time(NULL);
     return true;
 }

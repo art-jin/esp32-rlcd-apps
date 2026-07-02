@@ -36,6 +36,13 @@ CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE=n
 
+# Enabled apps (factory default = Calendar only). Toggle per deployment.
+# MENU + Calendar are always on; the rest are gated here.
+CONFIG_KINCAL_APP_XIAOZHI=y
+CONFIG_KINCAL_APP_CODEPILOT=y
+# CONFIG_KINCAL_APP_SNAKE is not set
+# CONFIG_KINCAL_APP_TETRIS is not set
+
 # Cache tuning for ESP32-S3
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 

@@ -36,6 +36,7 @@
 #include "protocol.h"
 #include "state_manager.h"
 #include "ws_server.h"
+#include "serial_input.h"        // USB Serial/JTAG RX (bridge_usb.js path)
 
 static const char *TAG = "CodePilot";
 
@@ -92,22 +93,31 @@ static void draw_detail_view(void);
 static void draw_notify_view(void);
 static void render_current_view(void);
 
-// ── Worker: drain WS recv queue → state_manager → mark dirty ────────────────
+// ── Worker: drain bridge queues → state_manager → mark dirty ────────────────
+// Two transports, one consumer. USB serial (bridge_usb.js) is primary; the WS
+// server is kept as a debug/fallback path. Poll serial first with a real
+// timeout, then non-blocking WS in case both clients happen to be active.
 static void cp_worker(void *arg)
 {
     ESP_LOGI(TAG, "Worker started");
     char buf[WS_MAX_MESSAGE_LEN];
 
     while (!s_stop_flag) {
-        // Block up to 200ms waiting for a message so we can re-check stop_flag
-        if (ws_server_recv_line(buf, sizeof(buf), pdMS_TO_TICKS(200))) {
-            bool ok = state_manager_update_from_bridge(buf);
-            if (ok) {
-                s_dirty = true;
-                ESP_LOGI(TAG, "Updated state from bridge: %.60s", buf);
-            } else {
-                ESP_LOGW(TAG, "Failed to process: %.60s", buf);
-            }
+        buf[0] = '\0';
+        if (serial_input_recv_line(buf, sizeof(buf), pdMS_TO_TICKS(100))) {
+            // fall through to process
+        } else if (ws_server_recv_line(buf, sizeof(buf), 0)) {
+            // fall through to process
+        } else {
+            continue;  // neither had data; loop back, re-check stop_flag
+        }
+
+        bool ok = state_manager_update_from_bridge(buf);
+        if (ok) {
+            s_dirty = true;
+            ESP_LOGI(TAG, "Bridge: %.60s", buf);
+        } else {
+            ESP_LOGW(TAG, "Bad msg: %.60s", buf);
         }
     }
 
@@ -158,6 +168,7 @@ void codepilot_on_enter(void)
 
     state_manager_init();
     ws_server_start();
+    serial_input_start();   // USB Serial/JTAG RX for bridge_usb.js
 
     // Initial screen
     app_manager_display_lock();
@@ -221,6 +232,7 @@ void codepilot_on_exit(void)
         }
     }
     ws_server_stop();
+    serial_input_stop();
 }
 
 void codepilot_on_key(key_event_t key)
@@ -420,8 +432,9 @@ static void draw_agent_panel(int x, int y, int w, int h,
     snprintf(status_line, sizeof(status_line), "%s", agent->status[0] ? agent->status : "-");
     st7306_draw_text(x + 6, y + 20, status_line, ST7306_COLOR_BLACK);
 
-    // Quota progress bar
-    int bar_y = y + h - 24;
+    // Quota progress bar (leave 12px below for quota text + breathing room
+    // above the panel border — text was being clipped when bar sat at y+h-24)
+    int bar_y = y + h - 32;
     int bar_x = x + 6;
     int bar_w = w - 12;
     st7306_draw_rect(bar_x, bar_y, bar_w, 8, ST7306_COLOR_BLACK);
@@ -449,7 +462,9 @@ static void draw_split_view(void)
     const agent_state_t *a1 = st->agent_count >= 2 ? &st->agents[1] : NULL;
 
     int half_w = (ST7306_WIDTH - 8) / 2;
-    int panel_h = CP_CONTENT_BOTTOM - CP_CONTENT_TOP - 4;
+    // Leave 34px at bottom for STT area (drawn after this); otherwise STT band
+    // overwrites the agent's quota bar/text.
+    int panel_h = CP_CONTENT_BOTTOM - CP_CONTENT_TOP - 34;
     draw_agent_panel(2,                  CP_CONTENT_TOP, half_w, panel_h, a0, true);
     draw_agent_panel(4 + half_w + 2,     CP_CONTENT_TOP, half_w, panel_h, a1, false);
 
@@ -512,6 +527,21 @@ static void draw_detail_view(void)
     char s[40];
     snprintf(s, sizeof(s), "Status: %s", a->status[0] ? a->status : "-");
     st7306_draw_text(20, bar_y + 50, s, ST7306_COLOR_BLACK);
+
+    // Compact-format fields from bridge_usb.js. Render only when populated
+    // (non-zero cost / minutes), so the screen isn't full of zeros when the
+    // legacy JSON path is in use.
+    if (a->cost_cents > 0 || a->session_minutes > 0) {
+        char c[40];
+        snprintf(c, sizeof(c), "$%lu.%02lu  %umin",
+                 (unsigned long)a->cost_cents / 100,
+                 (unsigned long)a->cost_cents % 100,
+                 (unsigned)a->session_minutes);
+        st7306_draw_text(20, bar_y + 68, c, ST7306_COLOR_BLACK);
+    }
+    if (a->project[0]) {
+        st7306_draw_text(20, bar_y + 84, a->project, ST7306_COLOR_BLACK);
+    }
 
     state_manager_unlock();
 }
