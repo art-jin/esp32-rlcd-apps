@@ -159,6 +159,10 @@ static void calendar_worker(void *arg)
             (s_kincal_counter == 3 && g_event_count == 0)) {
             s_kincal_counter = 0;
             fetch_and_apply_kincal(y, m, d);
+            // Stop signal may have arrived during the up-to-4s fetch.
+            // Bail before the redraw — the lock/unlock window here is the
+            // danger zone where force-kill would orphan the display mutex.
+            if (s_stop_flag) break;
             // Reflect the new state on screen immediately.
             app_manager_display_lock();
             calendar_draw_with_weather(y, m, d, &g_weather);
@@ -176,6 +180,18 @@ static void calendar_worker(void *arg)
         if (++s_env_counter >= 60) {
             s_env_counter = 0;
             if (shtc3_measure()) {
+                /* When KinCal response omitted weather (e.g. plan doesn't
+                 * include outdoor weather), drive the top weather panel
+                 * from SHTC3 indoor readings so the user sees live data
+                 * instead of the hardcoded 25°C / 55% / 多云 defaults. */
+                if (!g_kincal_has_weather) {
+                    static const uint8_t gb_shinei[] = {0xCA, 0xD2, 0xC4, 0xDA, 0};  // 室内
+                    g_weather.temperature = shtc3_last_temperature();
+                    g_weather.humidity    = (int)shtc3_last_humidity();
+                    g_weather.description = NULL;
+                    g_weather.city        = gb_shinei;
+                }
+                if (s_stop_flag) break;  // see KinCal block above for rationale
                 app_manager_display_lock();
                 calendar_draw_env_data(shtc3_last_temperature(),
                                        shtc3_last_humidity());
@@ -213,6 +229,17 @@ void calendar_on_enter(void)
     // First fetch will happen at counter==3 (≈3s after entry)
 #endif
 
+    // Early SHTC3 read so the first draw uses real indoor data when KinCal
+    // doesn't provide outdoor weather. Avoids a 1s flash of the 25°C / 55%
+    // / 多云 hardcoded defaults before the worker's first measure lands.
+    if (!g_kincal_has_weather && shtc3_measure()) {
+        static const uint8_t gb_shinei[] = {0xCA, 0xD2, 0xC4, 0xDA, 0};  // 室内
+        g_weather.temperature = shtc3_last_temperature();
+        g_weather.humidity    = (int)shtc3_last_humidity();
+        g_weather.description = NULL;
+        g_weather.city        = gb_shinei;
+    }
+
     // Initial full draw
     time_t now;
     time(&now);
@@ -244,8 +271,16 @@ void calendar_on_exit(void)
     ESP_LOGI(TAG, "Exiting calendar");
     s_stop_flag = true;
     if (s_worker) {
-        if (xSemaphoreTake(s_exit_sem, pdMS_TO_TICKS(2000)) != pdPASS) {
-            ESP_LOGE(TAG, "Worker did not exit in 2s, force killing");
+        /* Wait window must exceed the worker's longest uninterruptible
+         * section: KinCal fetch is capped at 4s (kincal_client.c), the
+         * post-fetch redraw is ~200ms, plus margin. Force-killing the
+         * worker while it holds the recursive display mutex orphans the
+         * mutex (FreeRTOS does not release mutexes owned by a deleted
+         * task), and the dispatcher's next display_lock() deadlocks. */
+        if (xSemaphoreTake(s_exit_sem, pdMS_TO_TICKS(6000)) != pdPASS) {
+            ESP_LOGE(TAG, "Worker did not exit in 6s — force-kill risks "
+                          "orphaning the display mutex (next switch may "
+                          "deadlock). Killing as last resort.");
             vTaskDelete(s_worker);
             s_worker = NULL;
         }

@@ -261,7 +261,10 @@ esp_err_t kincal_client_fetch(kincal_display_data_t *out)
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_GET,
-        .timeout_ms = 10000,
+        // 4s cap so calendar_on_exit's wait window (6s) always exceeds the
+        // worst-case fetch. Otherwise the worker can still be inside this
+        // call when the exit timeout fires — see calendar_app.c on_exit.
+        .timeout_ms = 4000,
         .event_handler = http_event_handler,
         .transport_type = s_use_https ? HTTP_TRANSPORT_OVER_SSL
                                       : HTTP_TRANSPORT_OVER_TCP,

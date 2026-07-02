@@ -2,6 +2,7 @@
 #define KINCAL_BRIDGE_H
 
 #include "kincal_client.h"
+#include <stdbool.h>
 
 /**
  * Apply a freshly-fetched KinCal payload to the calendar.c rendering state.
@@ -24,5 +25,10 @@ void kincal_bridge_apply(const kincal_display_data_t *d);
  * its local static holiday table + lunar computation.
  */
 void kincal_bridge_clear(void);
+
+/* True iff the most recent KinCal response included the weather object.
+ * calendar_app.c reads this to fall back to SHTC3 indoor readings when
+ * the plan doesn't include outdoor weather. */
+extern bool g_kincal_has_weather;
 
 #endif /* KINCAL_BRIDGE_H */

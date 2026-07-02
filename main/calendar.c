@@ -473,7 +473,8 @@ static void draw_left_panel(const weather_data_t *weather)
     int wc_top = py;
     int cy = py + 3;
 
-    hzk16_draw_gb_text(px, cy, gb_beijing, ST7306_COLOR_BLACK);
+    hzk16_draw_gb_text(px, cy, weather->city ? weather->city : gb_beijing,
+                       ST7306_COLOR_BLACK);
     cy += 18;
 
     char temp_str[8];

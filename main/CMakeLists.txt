@@ -62,6 +62,11 @@ endif()
 # xiaozhi_core is always required: SHTC3 reuses its I2C bus, hello_world_main
 # calls xiaozhi_init() at boot, and xiaozhi_app_display pulls in xiaozhi_bridge.h.
 # esp_http_server is always required: wifi_manager.c captive portal uses it.
+# codepilot_core is unconditionally required as a dependency even when the
+# CodePilot app is disabled — its component is always in the build tree and
+# the always-compiled xiaozhi_app_display.c path doesn't reference it, but
+# making it conditional breaks the build due to ESP-IDF component resolution
+# ordering. The app-level gating happens via SRCS and app_registry.c.
 set(PRIV_REQUIRES
     spi_flash
     esp_lcd
@@ -76,11 +81,8 @@ set(PRIV_REQUIRES
     esp_timer
     esp_adc
     xiaozhi_core
+    codepilot_core
 )
-
-if(CONFIG_KINCAL_APP_CODEPILOT)
-    list(APPEND PRIV_REQUIRES codepilot_core)
-endif()
 
 idf_component_register(SRCS ${SRCS}
                        PRIV_REQUIRES ${PRIV_REQUIRES}

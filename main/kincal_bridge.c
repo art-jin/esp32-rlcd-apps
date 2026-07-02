@@ -43,6 +43,11 @@ uint8_t g_kincal_event_count    = 0;
 uint8_t g_kincal_lunar_text[32] = {0};   // GB2312 encoded "农历四月十二"
 bool   g_kincal_has_lunar       = false;
 
+// True when the most recent KinCal response included the weather object.
+// calendar_app.c reads this to decide whether to fall back to SHTC3 indoor
+// readings for the weather panel.
+bool   g_kincal_has_weather     = false;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // Parse "HH:MM" → hour/min. Returns false for "全天" or unparseable strings.
@@ -128,6 +133,7 @@ void kincal_bridge_apply(const kincal_display_data_t *d)
     }
 
     /* ── weather (if plan-gated present) ── */
+    g_kincal_has_weather = d->has_weather;
     if (d->has_weather) {
         g_weather.temperature = (float)d->weather.temp_c;
         g_weather.humidity = (d->weather.humidity >= 0)
@@ -148,6 +154,9 @@ void kincal_bridge_apply(const kincal_display_data_t *d)
         }
         /* weather_code unused for rendering — set a sentinel */
         g_weather.weather_code = -1;
+        /* Reset city to NULL so calendar.c falls back to 北京 (outdoor mode).
+         * When !has_weather, calendar_app.c will overwrite with 室内 from SHTC3. */
+        g_weather.city = NULL;
     }
 
     /* ── events: flatten events_today + upcoming into g_events[] ──

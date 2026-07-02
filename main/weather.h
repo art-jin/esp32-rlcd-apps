@@ -9,6 +9,7 @@ typedef struct {
     int humidity;                /* percent 0-100 */
     int weather_code;            /* WMO weather code */
     const uint8_t *description;  /* GB2312 encoded description string */
+    const uint8_t *city;         /* GB2312 encoded city label, NULL = default (北京) */
 } weather_data_t;
 
 /**
