@@ -14,6 +14,7 @@ typedef enum {
     APP_ID_CODEPILOT,
     APP_ID_SNAKE,
     APP_ID_TETRIS,
+    APP_ID_TOWER,
     APP_ID_COUNT,
 } app_id_t;
 

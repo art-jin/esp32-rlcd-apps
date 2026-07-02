@@ -42,6 +42,9 @@ static const app_id_t s_menu_items[] = {
 #if CONFIG_KINCAL_APP_TETRIS
     APP_ID_TETRIS,
 #endif
+#if CONFIG_KINCAL_APP_TOWER
+    APP_ID_TOWER,
+#endif
 };
 #define MENU_ITEM_COUNT (sizeof(s_menu_items) / sizeof(s_menu_items[0]))
 

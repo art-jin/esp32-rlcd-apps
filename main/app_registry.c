@@ -16,6 +16,7 @@
 #include "codepilot_app.h"
 #include "snake_app.h"
 #include "tetris_app.h"
+#include "tower_defense_app.h"
 #include "placeholder_app.h"
 
 // GB2312 pre-encoded display names (always-on apps)
@@ -33,6 +34,9 @@ static const uint8_t nm_snake[]    = {0xCC, 0xB0, 0xB3, 0xD4, 0xC9, 0xDF, 0};   
 #if CONFIG_KINCAL_APP_TETRIS
 static const uint8_t nm_tetris[]   = {0xB6, 0xED, 0xC2, 0xDE, 0xCB, 0xB9,
                                        0xB7, 0xBD, 0xBF, 0xE9, 0};                   // 俄罗斯方块
+#endif
+#if CONFIG_KINCAL_APP_TOWER
+static const uint8_t nm_tower[]    = {0xC5, 0xDA, 0xCB, 0xFE, 0xB7, 0xC0, 0xCA, 0xD8, 0}; // 炮塔防守
 #endif
 
 static const app_t s_apps[APP_ID_COUNT] = {
@@ -68,6 +72,12 @@ static const app_t s_apps[APP_ID_COUNT] = {
     [APP_ID_TETRIS] = {
         APP_ID_TETRIS, (const char *)nm_tetris,
         tetris_on_enter, tetris_on_exit, tetris_on_key, NULL,
+    },
+#endif
+#if CONFIG_KINCAL_APP_TOWER
+    [APP_ID_TOWER] = {
+        APP_ID_TOWER, (const char *)nm_tower,
+        tower_on_enter, tower_on_exit, tower_on_key, NULL,
     },
 #endif
 };

@@ -58,6 +58,10 @@ if(CONFIG_KINCAL_APP_TETRIS)
     list(APPEND SRCS tetris_app.c)
 endif()
 
+if(CONFIG_KINCAL_APP_TOWER)
+    list(APPEND SRCS tower_defense_app.c)
+endif()
+
 # Conditional component requirements.
 # xiaozhi_core is always required: SHTC3 reuses its I2C bus, hello_world_main
 # calls xiaozhi_init() at boot, and xiaozhi_app_display pulls in xiaozhi_bridge.h.

@@ -71,4 +71,13 @@ menu "Enabled Apps"
         default n
         help
             Phase D game. Off by default for KinCal-only firmware.
+
+    config KINCAL_APP_TOWER
+        bool "Enable Tower Defense game"
+        default n
+        help
+            Turret defense game. PREV/NEXT rotate the central turret,
+            ENTER fires. Designed for 4-key hardware; on single-key
+            firmware entering the app exits immediately (same as
+            Snake/Tetris).
 endmenu
