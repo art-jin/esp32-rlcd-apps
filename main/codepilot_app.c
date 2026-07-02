@@ -53,22 +53,13 @@ static const uint8_t gb_yilian[]   = {0xD2, 0xD1, 0xC1, 0xAC, 0xBD, 0xD3, 0};   
 static const uint8_t gb_fan[]      = {0xB7, 0xB5, 0xBB, 0xD8, 0};
 static const uint8_t gb_caidan[]   = {0xB2, 0xCB, 0xB5, 0xA5, 0};
 
-// View state
+// View state — single full-screen agent view. PREV/NEXT cycle the agent
+// (browser-tab style), not the view. Future INTERACT view for permission
+// requests will be added here.
 typedef enum {
-    CP_VIEW_SPLIT = 0,
-    CP_VIEW_DETAIL,
-    CP_VIEW_NOTIFY,
+    CP_VIEW_AGENT = 0,
     CP_VIEW_COUNT,
 } cp_view_t;
-
-static const char *view_name(cp_view_t v) {
-    switch (v) {
-        case CP_VIEW_SPLIT:  return "SPLIT";
-        case CP_VIEW_DETAIL: return "DETAIL";
-        case CP_VIEW_NOTIFY: return "NOTIFY";
-        default:             return "?";
-    }
-}
 
 // Lifecycle state
 static volatile bool   s_stop_flag = false;
@@ -76,7 +67,8 @@ static SemaphoreHandle_t s_exit_sem = NULL;
 static TaskHandle_t    s_worker = NULL;     // CodePilot WS drain task
 static TaskHandle_t    s_xiaozhi_task = NULL;  // XiaoZhi STT pipeline task
 static SemaphoreHandle_t s_xz_exit_sem = NULL;
-static cp_view_t       s_current_view = CP_VIEW_SPLIT;
+static cp_view_t       s_current_view = CP_VIEW_AGENT;
+static uint8_t         s_current_agent_idx = 0;  // tab cursor, 0..agent_count-1
 static volatile bool   s_dirty = true;     // redraw required
 static volatile bool   s_listening = false;  // true while KEY_LONG held
 
@@ -88,9 +80,7 @@ static volatile bool s_stt_dirty = false;
 // Forward decls
 static void draw_top_bar(void);
 static void draw_bottom_bar(void);
-static void draw_split_view(void);
-static void draw_detail_view(void);
-static void draw_notify_view(void);
+static void draw_agent_view(void);
 static void render_current_view(void);
 
 // ── Worker: drain bridge queues → state_manager → mark dirty ────────────────
@@ -156,7 +146,8 @@ void codepilot_on_enter(void)
     ESP_LOGI(TAG, "Entering CodePilot");
 
     s_stop_flag = false;
-    s_current_view = CP_VIEW_SPLIT;
+    s_current_view = CP_VIEW_AGENT;
+    s_current_agent_idx = 0;
     s_dirty = true;
     s_listening = false;
     s_stt_buf[0] = '\0';
@@ -237,17 +228,26 @@ void codepilot_on_exit(void)
 
 void codepilot_on_key(key_event_t key)
 {
-    cp_view_t old = s_current_view;
     switch (key) {
         case KEY_BACK:
             app_manager_switch(APP_ID_MENU);
             return;
         case KEY_PREV:
-            s_current_view = (cp_view_t)((s_current_view - 1 + CP_VIEW_COUNT) % CP_VIEW_COUNT);
-            break;
-        case KEY_NEXT:
-            s_current_view = (cp_view_t)((s_current_view + 1) % CP_VIEW_COUNT);
-            break;
+        case KEY_NEXT: {
+            // Cycle the agent tab cursor (browser-tab style), not the view.
+            state_manager_lock();
+            uint8_t cnt = state_manager_get_state()->agent_count;
+            state_manager_unlock();
+            if (cnt == 0) return;
+            int dir = (key == KEY_NEXT) ? 1 : -1;
+            uint8_t old = s_current_agent_idx;
+            s_current_agent_idx = (uint8_t)((old + dir + cnt) % cnt);
+            if (s_current_agent_idx != old) {
+                ESP_LOGI(TAG, "Agent tab: %u -> %u", old, s_current_agent_idx);
+                s_dirty = true;
+            }
+            return;
+        }
         case KEY_LONG_START:
             // Begin voice input: mute speaker, trigger XiaoZhi STT
             if (!s_listening) {
@@ -268,10 +268,6 @@ void codepilot_on_key(key_event_t key)
             return;
         default:
             return;
-    }
-    if (s_current_view != old) {
-        ESP_LOGI(TAG, "View: %s -> %s", view_name(old), view_name(s_current_view));
-        s_dirty = true;
     }
 }
 
@@ -322,7 +318,7 @@ static void draw_bottom_bar(void)
     hzk16_draw_gb_text(x, y + 4, gb_caidan, ST7306_COLOR_BLACK);
 
     // View indicator
-    const char *vn = view_name(s_current_view);
+    const char *vn = "AGENT";
     int vn_w = st7306_text_width(vn);
     st7306_draw_text(ST7306_WIDTH - vn_w - 4, y + 4, vn, ST7306_COLOR_BLACK);
 }
@@ -385,14 +381,9 @@ static void render_current_view(void)
 
     // Reserve bottom 32px for STT input
     int content_bottom = CP_CONTENT_BOTTOM - 34;
-
-    switch (s_current_view) {
-        case CP_VIEW_SPLIT:  draw_split_view();  break;
-        case CP_VIEW_DETAIL: draw_detail_view(); break;
-        case CP_VIEW_NOTIFY: draw_notify_view(); break;
-        default: break;
-    }
     (void)content_bottom;
+
+    draw_agent_view();
 
     draw_stt_area();
     draw_bottom_bar();
@@ -400,176 +391,128 @@ static void render_current_view(void)
     app_manager_display_unlock();
 }
 
-// ASCII render of an agent's basic info to a horizontal panel
-static void draw_agent_panel(int x, int y, int w, int h,
-                              const agent_state_t *agent, bool focus)
-{
-    // Border
-    st7306_draw_rect(x, y, w, h, ST7306_COLOR_BLACK);
-    if (focus) {
-        // Thicker border for focused panel: draw inner rect
-        st7306_draw_rect(x + 2, y + 2, w - 4, h - 4, ST7306_COLOR_BLACK);
-    }
-
-    if (!agent) {
-        // Empty slot
-        return;
-    }
-
-    // Agent name (small, top-left)
-    const char *name = protocol_agent_type_to_string(agent->type);
-    st7306_draw_text(x + 6, y + 4, name, ST7306_COLOR_BLACK);
-
-    // Active indicator (filled box vs hollow)
-    if (agent->active) {
-        st7306_draw_filled_rect(x + w - 16, y + 4, 10, 10, ST7306_COLOR_BLACK);
-    } else {
-        st7306_draw_rect(x + w - 16, y + 4, 10, 10, ST7306_COLOR_BLACK);
-    }
-
-    // Status string (next row)
-    char status_line[40];
-    snprintf(status_line, sizeof(status_line), "%s", agent->status[0] ? agent->status : "-");
-    st7306_draw_text(x + 6, y + 20, status_line, ST7306_COLOR_BLACK);
-
-    // Quota progress bar (leave 12px below for quota text + breathing room
-    // above the panel border — text was being clipped when bar sat at y+h-24)
-    int bar_y = y + h - 32;
-    int bar_x = x + 6;
-    int bar_w = w - 12;
-    st7306_draw_rect(bar_x, bar_y, bar_w, 8, ST7306_COLOR_BLACK);
-    if (agent->quota_total > 0) {
-        int fill = (int)((bar_w - 2) * (uint64_t)agent->quota_used / agent->quota_total);
-        if (fill > 0) {
-            st7306_draw_filled_rect(bar_x + 1, bar_y + 1, fill, 6, ST7306_COLOR_BLACK);
-        }
-    }
-
-    // Quota text below
-    char q[32];
-    snprintf(q, sizeof(q), "%lu/%lu", (unsigned long)agent->quota_used,
-             (unsigned long)agent->quota_total);
-    st7306_draw_text(bar_x, bar_y + 10, q, ST7306_COLOR_BLACK);
-}
-
-static void draw_split_view(void)
-{
-    state_manager_lock();
-    const global_state_t *st = state_manager_get_state();
-
-    // Show first two agents (Claude + Kimi typically)
-    const agent_state_t *a0 = st->agent_count >= 1 ? &st->agents[0] : NULL;
-    const agent_state_t *a1 = st->agent_count >= 2 ? &st->agents[1] : NULL;
-
-    int half_w = (ST7306_WIDTH - 8) / 2;
-    // Leave 34px at bottom for STT area (drawn after this); otherwise STT band
-    // overwrites the agent's quota bar/text.
-    int panel_h = CP_CONTENT_BOTTOM - CP_CONTENT_TOP - 34;
-    draw_agent_panel(2,                  CP_CONTENT_TOP, half_w, panel_h, a0, true);
-    draw_agent_panel(4 + half_w + 2,     CP_CONTENT_TOP, half_w, panel_h, a1, false);
-
-    // Connection state at bottom of content
-    const uint8_t *conn = ws_server_is_connected() ? gb_yilian : gb_weilian;
-    int cw = hzk16_text_width(conn);
-    hzk16_draw_gb_text((ST7306_WIDTH - cw) / 2, CP_CONTENT_BOTTOM - 18, conn, ST7306_COLOR_BLACK);
-
-    state_manager_unlock();
-}
-
-static void draw_detail_view(void)
+// Single full-screen agent view. PREV/NEXT cycle the agent tab cursor
+// (s_current_agent_idx), not the view. Layout:
+//   y=36   tab row   "name (idx+1/count)"
+//   y=54   hline
+//   y=60   status line  with ■/□ active indicator
+//   y=80   current task (truncated)
+//   y=96   hline
+//   y=104  quota progress bar  (h=20, the headline number)
+//   y=130  quota %  +  $cost
+//   y=148  hline
+//   y=156  $rate/h      |     session time   (left/right)
+//   y=176  +added / -removed lines
+//   y=196  project name (truncated)
+// Content area y=32..240 (STT band claims 240..272).
+static void draw_agent_view(void)
 {
     state_manager_lock();
     const global_state_t *st = state_manager_get_state();
 
     if (st->agent_count == 0) {
-        // No agent — show "未连接"
-        const uint8_t *msg = gb_weilian;
-        int w = hzk16_text_width(msg);
-        hzk16_draw_gb_text((ST7306_WIDTH - w) / 2, CP_CONTENT_TOP + 20, msg, ST7306_COLOR_BLACK);
+        // No data yet — show "未连接" / "等待数据" stacked, centered
+        int w1 = hzk16_text_width(gb_weilian);
+        hzk16_draw_gb_text((ST7306_WIDTH - w1) / 2, CP_CONTENT_TOP + 30,
+                          gb_weilian, ST7306_COLOR_BLACK);
+        int w2 = hzk16_text_width(gb_dengdai);
+        hzk16_draw_gb_text((ST7306_WIDTH - w2) / 2, CP_CONTENT_TOP + 60,
+                          gb_dengdai, ST7306_COLOR_BLACK);
         state_manager_unlock();
         return;
     }
 
-    const agent_state_t *a = &st->agents[0];  // Claude typically
+    // Clamp tab cursor in case agent_count shrank (agent disconnected)
+    if (s_current_agent_idx >= st->agent_count) s_current_agent_idx = 0;
+    const agent_state_t *a = &st->agents[s_current_agent_idx];
 
-    // Big name
-    const char *name = protocol_agent_type_to_string(a->type);
-    int nw = st7306_text_width(name);
-    st7306_draw_text((ST7306_WIDTH - nw) / 2, CP_CONTENT_TOP, name, ST7306_COLOR_BLACK);
+    // === Section 1: identity ===
+    char tab[40];
+    snprintf(tab, sizeof(tab), "%s  (%d/%d)",
+             protocol_agent_type_to_string(a->type),
+             s_current_agent_idx + 1, st->agent_count);
+    st7306_draw_text(8, 36, tab, ST7306_COLOR_BLACK);
+    st7306_draw_hline(0, ST7306_WIDTH - 1, 54, ST7306_COLOR_BLACK);
 
-    // Active state — large box
-    int box_y = CP_CONTENT_TOP + 20;
+    // === Section 2: status + task ===
     if (a->active) {
-        st7306_draw_filled_rect(ST7306_WIDTH/2 - 30, box_y, 60, 30, ST7306_COLOR_BLACK);
-        st7306_draw_text(ST7306_WIDTH/2 - 14, box_y + 8, "ACT", ST7306_COLOR_WHITE);
+        st7306_draw_filled_rect(8, 62, 12, 12, ST7306_COLOR_BLACK);
     } else {
-        st7306_draw_rect(ST7306_WIDTH/2 - 30, box_y, 60, 30, ST7306_COLOR_BLACK);
-        st7306_draw_text(ST7306_WIDTH/2 - 12, box_y + 8, "IDLE", ST7306_COLOR_BLACK);
+        st7306_draw_rect(8, 62, 12, 12, ST7306_COLOR_BLACK);
     }
+    char stat[48];
+    snprintf(stat, sizeof(stat), "%s  %s",
+             a->active ? "Active" : "Idle",
+             a->status[0] ? a->status : "-");
+    st7306_draw_text(24, 60, stat, ST7306_COLOR_BLACK);
 
-    // Quota progress bar (large)
-    int bar_y = box_y + 50;
-    int bar_x = 20;
-    int bar_w = ST7306_WIDTH - 40;
-    st7306_draw_rect(bar_x, bar_y, bar_w, 16, ST7306_COLOR_BLACK);
+    if (a->current_task[0]) {
+        char task[40];
+        snprintf(task, sizeof(task), "%.34s", a->current_task);
+        st7306_draw_text(8, 80, task, ST7306_COLOR_BLACK);
+    }
+    st7306_draw_hline(0, ST7306_WIDTH - 1, 96, ST7306_COLOR_BLACK);
+
+    // === Section 3: quota (the headline) ===
+    int bar_x = 20, bar_y = 104, bar_w = ST7306_WIDTH - 40, bar_h = 20;
+    st7306_draw_rect(bar_x, bar_y, bar_w, bar_h, ST7306_COLOR_BLACK);
     if (a->quota_total > 0) {
         int fill = (int)((bar_w - 2) * (uint64_t)a->quota_used / a->quota_total);
         if (fill > 0) {
-            st7306_draw_filled_rect(bar_x + 1, bar_y + 1, fill, 14, ST7306_COLOR_BLACK);
+            st7306_draw_filled_rect(bar_x + 1, bar_y + 1, fill, bar_h - 2, ST7306_COLOR_BLACK);
         }
     }
-    char q[40];
-    snprintf(q, sizeof(q), "%lu / %lu", (unsigned long)a->quota_used,
-             (unsigned long)a->quota_total);
-    st7306_draw_text(bar_x, bar_y + 22, q, ST7306_COLOR_BLACK);
+    {
+        char left[16], right[32];
+        if (a->quota_total > 0) {
+            snprintf(left, sizeof(left), "%lu%%", (unsigned long)a->quota_used);
+        } else {
+            snprintf(left, sizeof(left), "--%%");
+        }
+        st7306_draw_text(bar_x, bar_y + bar_h + 4, left, ST7306_COLOR_BLACK);
 
-    // Status line
-    char s[40];
-    snprintf(s, sizeof(s), "Status: %s", a->status[0] ? a->status : "-");
-    st7306_draw_text(20, bar_y + 50, s, ST7306_COLOR_BLACK);
+        if (a->cost_cents > 0) {
+            snprintf(right, sizeof(right), "$%lu.%02lu",
+                     (unsigned long)a->cost_cents / 100,
+                     (unsigned long)a->cost_cents % 100);
+            int rw = st7306_text_width(right);
+            st7306_draw_text(bar_x + bar_w - rw, bar_y + bar_h + 4, right, ST7306_COLOR_BLACK);
+        }
+    }
+    st7306_draw_hline(0, ST7306_WIDTH - 1, 148, ST7306_COLOR_BLACK);
 
-    // Compact-format fields from bridge_usb.js. Render only when populated
-    // (non-zero cost / minutes), so the screen isn't full of zeros when the
-    // legacy JSON path is in use.
-    if (a->cost_cents > 0 || a->session_minutes > 0) {
-        char c[40];
-        snprintf(c, sizeof(c), "$%lu.%02lu  %umin",
-                 (unsigned long)a->cost_cents / 100,
-                 (unsigned long)a->cost_cents % 100,
-                 (unsigned)a->session_minutes);
-        st7306_draw_text(20, bar_y + 68, c, ST7306_COLOR_BLACK);
+    // === Section 4: rate / session / lines / project ===
+    {
+        char rate[24];
+        if (a->rate_cents_per_hour > 0) {
+            snprintf(rate, sizeof(rate), "$%lu.%02lu/h",
+                     (unsigned long)a->rate_cents_per_hour / 100,
+                     (unsigned long)a->rate_cents_per_hour % 100);
+            st7306_draw_text(8, 156, rate, ST7306_COLOR_BLACK);
+        }
+    }
+    {
+        char sess[24];
+        if (a->session_minutes > 0) {
+            unsigned h = a->session_minutes / 60;
+            unsigned m = a->session_minutes % 60;
+            if (h > 0) snprintf(sess, sizeof(sess), "%uh %umin", h, m);
+            else       snprintf(sess, sizeof(sess), "%umin", m);
+            int sw = st7306_text_width(sess);
+            st7306_draw_text(ST7306_WIDTH - sw - 8, 156, sess, ST7306_COLOR_BLACK);
+        }
+    }
+    if (a->lines_added > 0 || a->lines_removed > 0) {
+        char ln[40];
+        snprintf(ln, sizeof(ln), "+%lu / -%lu lines",
+                 (unsigned long)a->lines_added,
+                 (unsigned long)a->lines_removed);
+        st7306_draw_text(8, 176, ln, ST7306_COLOR_BLACK);
     }
     if (a->project[0]) {
-        st7306_draw_text(20, bar_y + 84, a->project, ST7306_COLOR_BLACK);
-    }
-
-    state_manager_unlock();
-}
-
-static void draw_notify_view(void)
-{
-    state_manager_lock();
-    const notification_t *n = state_manager_get_highest_priority_notification();
-
-    if (!n) {
-        const uint8_t no_msg[] = {0xCE, 0xDE, 0xCD, 0xA8, 0xD6, 0xAA, 0};  // 无通知
-        int w = hzk16_text_width(no_msg);
-        hzk16_draw_gb_text((ST7306_WIDTH - w) / 2, ST7306_HEIGHT / 2 - 8,
-                          no_msg, ST7306_COLOR_BLACK);
-    } else {
-        char id_line[80];
-        snprintf(id_line, sizeof(id_line), "ID: %.60s", n->id);
-        st7306_draw_text(8, CP_CONTENT_TOP, id_line, ST7306_COLOR_BLACK);
-
-        char sev_line[40];
-        snprintf(sev_line, sizeof(sev_line), "Severity: %s",
-                 protocol_severity_to_string(n->severity));
-        st7306_draw_text(8, CP_CONTENT_TOP + 20, sev_line, ST7306_COLOR_BLACK);
-
-        // Message body (ASCII, may be truncated)
-        char msg[80];
-        snprintf(msg, sizeof(msg), "%.70s", n->message);
-        st7306_draw_text(8, CP_CONTENT_TOP + 50, msg, ST7306_COLOR_BLACK);
+        char pr[28];
+        snprintf(pr, sizeof(pr), "%.24s", a->project);
+        st7306_draw_text(8, 196, pr, ST7306_COLOR_BLACK);
     }
 
     state_manager_unlock();
