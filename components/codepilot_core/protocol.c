@@ -675,6 +675,7 @@ static bool protocol_parse_compact(const char* line, global_state_t* state) {
                 break;
             }
             case 'C': agent->cost_cents          = (uint32_t)strtoul(vbuf, NULL, 10); break;
+            case 'B': agent->budget_cents        = (uint32_t)strtoul(vbuf, NULL, 10); break;
             case 'R': agent->rate_cents_per_hour = (uint32_t)strtoul(vbuf, NULL, 10); break;
             case 'L': {
                 // L<added>,<removed>
@@ -687,6 +688,7 @@ static bool protocol_parse_compact(const char* line, global_state_t* state) {
                 break;
             }
             case 'T': agent->session_minutes     = (uint16_t)strtoul(vbuf, NULL, 10); break;
+            case 'S': agent->session_start_sec   = (uint32_t)strtoul(vbuf, NULL, 10); break;
             default: break;  // unknown tag — skip silently
         }
 

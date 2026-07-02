@@ -101,10 +101,12 @@ typedef struct {
     // Additive — older JSON-only callers leave these at 0.
     char     project[32];           // e.g. "esp32-rlcd-ap"
     uint32_t cost_cents;            // total session cost in cents
+    uint32_t budget_cents;          // session budget cap in cents (for "remaining")
     uint32_t rate_cents_per_hour;   // burn rate, cents per hour
     uint32_t lines_added;
     uint32_t lines_removed;
     uint16_t session_minutes;
+    uint32_t session_start_sec;     // unix epoch seconds the session began
 } agent_state_t;
 
 // Notification

@@ -52,6 +52,16 @@ static const uint8_t gb_weilian[]  = {0xCE, 0xB4, 0xC1, 0xAC, 0xBD, 0xD3, 0};   
 static const uint8_t gb_yilian[]   = {0xD2, 0xD1, 0xC1, 0xAC, 0xBD, 0xD3, 0};              // 已连接
 static const uint8_t gb_fan[]      = {0xB7, 0xB5, 0xBB, 0xD8, 0};
 static const uint8_t gb_caidan[]   = {0xB2, 0xCB, 0xB5, 0xA5, 0};
+// Metric labels (drawn before each numeric value)
+static const uint8_t gb_pei_e[]    = {0xC5, 0xE4, 0xB6, 0xEE, 0};  // 配额
+static const uint8_t gb_yi_yong[]  = {0xD2, 0xD1, 0xD3, 0xC3, 0};  // 已用
+static const uint8_t gb_sheng_yu[] = {0xCA, 0xA3, 0xD3, 0xE0, 0};  // 剩余
+static const uint8_t gb_su_lv[]    = {0xCB, 0xD9, 0xC2, 0xCA, 0};  // 速率
+static const uint8_t gb_shi_chang[]= {0xCA, 0xB1, 0xB3, 0xA4, 0};  // 时长
+static const uint8_t gb_qi_dong[]  = {0xC6, 0xF4, 0xB6, 0xAF, 0};  // 启动
+static const uint8_t gb_dai_ma[]   = {0xB4, 0xFA, 0xC2, 0xEB, 0};  // 代码
+static const uint8_t gb_hang[]     = {0xD0, 0xD0, 0};              // 行
+static const uint8_t gb_xiang_mu[] = {0xCF, 0xEE, 0xC4, 0xBF, 0};  // 项目
 
 // View state — single full-screen agent view. PREV/NEXT cycle the agent
 // (browser-tab style), not the view. Future INTERACT view for permission
@@ -325,16 +335,17 @@ static void draw_bottom_bar(void)
 
 static void draw_stt_area(void)
 {
-    // Reserve bottom 32px of content area for STT input
+    // Reserve bottom 32px of content area for STT input.
+    // When listening, invert colors (black bg + white text) as a clear
+    // "the mic is hot" cue — far more obvious than the small blinking box.
     int y = CP_CONTENT_BOTTOM - 32;
-    st7306_draw_filled_rect(0, y, ST7306_WIDTH, 32, ST7306_COLOR_WHITE);
+    int bg = s_listening ? ST7306_COLOR_BLACK : ST7306_COLOR_WHITE;
+    int fg = s_listening ? ST7306_COLOR_WHITE : ST7306_COLOR_BLACK;
+    st7306_draw_filled_rect(0, y, ST7306_WIDTH, 32, bg);
     st7306_draw_hline(0, ST7306_WIDTH - 1, y, ST7306_COLOR_BLACK);
 
-    // Label: "🎤" indicator + listening state
     if (s_listening) {
-        st7306_draw_text(4, y + 2, "MIC", ST7306_COLOR_BLACK);
-        // Blinking effect: draw filled box when listening
-        st7306_draw_filled_rect(ST7306_WIDTH - 16, y + 4, 8, 8, ST7306_COLOR_BLACK);
+        st7306_draw_text(4, y + 2, "MIC", fg);
     }
 
     // Render STT text (truncated to fit width)
@@ -362,10 +373,10 @@ static void draw_stt_area(void)
                 }
             }
             line[di] = 0;
-            hzk16_draw_gb_text(36, y + 8, line, ST7306_COLOR_BLACK);
+            hzk16_draw_gb_text(36, y + 8, line, fg);
         } else {
             // Fallback: ASCII render
-            st7306_draw_text(36, y + 8, s_stt_buf, ST7306_COLOR_BLACK);
+            st7306_draw_text(36, y + 8, s_stt_buf, fg);
         }
     }
 }
@@ -392,18 +403,15 @@ static void render_current_view(void)
 }
 
 // Single full-screen agent view. PREV/NEXT cycle the agent tab cursor
-// (s_current_agent_idx), not the view. Layout:
-//   y=36   tab row   "name (idx+1/count)"
-//   y=54   hline
-//   y=60   status line  with ■/□ active indicator
-//   y=80   current task (truncated)
-//   y=96   hline
-//   y=104  quota progress bar  (h=20, the headline number)
-//   y=130  quota %  +  $cost
-//   y=148  hline
-//   y=156  $rate/h      |     session time   (left/right)
-//   y=176  +added / -removed lines
-//   y=196  project name (truncated)
+// (s_current_agent_idx), not the view. Layout (merged tab+status saves a row):
+//   y=36   "name (idx+1/count)   ■ Active · Connected"   (tab + status merged)
+//   y=58   current task (truncated with "...")
+//   y=80   quota progress bar  (h=20, solid black when ≥80% as a warning)
+//   y=106  "配额 43%"  (left)   "剩余 $56.81"  (right, needs budget_cents)
+//   y=126  hline
+//   y=134  "速率 $0.55/h"  (left)   "时长 12h 57min"  (right)
+//   y=154  "启动 14:30"  (left)   "代码 +3344 / -784 行"  (right)
+//   y=174  "项目 esp32-rlcd-apps"
 // Content area y=32..240 (STT band claims 240..272).
 static void draw_agent_view(void)
 {
@@ -426,93 +434,152 @@ static void draw_agent_view(void)
     if (s_current_agent_idx >= st->agent_count) s_current_agent_idx = 0;
     const agent_state_t *a = &st->agents[s_current_agent_idx];
 
-    // === Section 1: identity ===
-    char tab[40];
-    snprintf(tab, sizeof(tab), "%s  (%d/%d)",
+    // === Row 1: tab + status merged ===
+    // "claude  (1/1)   ■ Active · Connected"
+    char tab[32];
+    snprintf(tab, sizeof(tab), "%s (%d/%d)",
              protocol_agent_type_to_string(a->type),
              s_current_agent_idx + 1, st->agent_count);
     st7306_draw_text(8, 36, tab, ST7306_COLOR_BLACK);
-    st7306_draw_hline(0, ST7306_WIDTH - 1, 54, ST7306_COLOR_BLACK);
+    int tab_w = st7306_text_width(tab);
+    int sx = 8 + tab_w + 12;
 
-    // === Section 2: status + task ===
+    // Active indicator: solid square if active, hollow if idle
     if (a->active) {
-        st7306_draw_filled_rect(8, 62, 12, 12, ST7306_COLOR_BLACK);
+        st7306_draw_filled_rect(sx, 38, 12, 12, ST7306_COLOR_BLACK);
     } else {
-        st7306_draw_rect(8, 62, 12, 12, ST7306_COLOR_BLACK);
+        st7306_draw_rect(sx, 38, 12, 12, ST7306_COLOR_BLACK);
     }
-    char stat[48];
+    sx += 16;
+
+    // "Active · Connected" or "Idle · Connected"
+    char stat[40];
     snprintf(stat, sizeof(stat), "%s  %s",
              a->active ? "Active" : "Idle",
              a->status[0] ? a->status : "-");
-    st7306_draw_text(24, 60, stat, ST7306_COLOR_BLACK);
+    st7306_draw_text(sx, 36, stat, ST7306_COLOR_BLACK);
 
+    // === Row 2: task with ellipsis on overflow ===
     if (a->current_task[0]) {
-        char task[40];
-        snprintf(task, sizeof(task), "%.34s", a->current_task);
-        st7306_draw_text(8, 80, task, ST7306_COLOR_BLACK);
-    }
-    st7306_draw_hline(0, ST7306_WIDTH - 1, 96, ST7306_COLOR_BLACK);
-
-    // === Section 3: quota (the headline) ===
-    int bar_x = 20, bar_y = 104, bar_w = ST7306_WIDTH - 40, bar_h = 20;
-    st7306_draw_rect(bar_x, bar_y, bar_w, bar_h, ST7306_COLOR_BLACK);
-    if (a->quota_total > 0) {
-        int fill = (int)((bar_w - 2) * (uint64_t)a->quota_used / a->quota_total);
-        if (fill > 0) {
-            st7306_draw_filled_rect(bar_x + 1, bar_y + 1, fill, bar_h - 2, ST7306_COLOR_BLACK);
+        const int max_w = ST7306_WIDTH - 16;
+        char task[56];
+        snprintf(task, sizeof(task), "%.52s", a->current_task);
+        if (st7306_text_width(task) > max_w) {
+            int chars_fit = (max_w - 24) / 8;  // leave 24px for "..."
+            if (chars_fit < 1) chars_fit = 1;
+            snprintf(task, sizeof(task), "%.*s...", chars_fit, a->current_task);
         }
+        st7306_draw_text(8, 58, task, ST7306_COLOR_BLACK);
     }
-    {
-        char left[16], right[32];
+
+    // === Row 3: quota bar (warning solid ≥ 80%) ===
+    int bar_x = 20, bar_y = 80, bar_w = ST7306_WIDTH - 40, bar_h = 20;
+    bool warning = (a->quota_total > 0 && a->quota_used >= 80);
+    if (warning) {
+        // Solid black bar with a thin white sliver showing how much is left
+        st7306_draw_filled_rect(bar_x, bar_y, bar_w, bar_h, ST7306_COLOR_BLACK);
+        int unused_pct = 100 - (int)a->quota_used;
+        int white_w = (int)((bar_w - 2) * unused_pct / 100);
+        if (white_w > 0) {
+            st7306_draw_filled_rect(bar_x + bar_w - white_w - 1, bar_y + 1,
+                                    white_w, bar_h - 2, ST7306_COLOR_WHITE);
+        }
+    } else {
+        st7306_draw_rect(bar_x, bar_y, bar_w, bar_h, ST7306_COLOR_BLACK);
         if (a->quota_total > 0) {
-            snprintf(left, sizeof(left), "%lu%%", (unsigned long)a->quota_used);
+            int fill = (int)((bar_w - 2) * (uint64_t)a->quota_used / a->quota_total);
+            if (fill > 0) {
+                st7306_draw_filled_rect(bar_x + 1, bar_y + 1, fill, bar_h - 2, ST7306_COLOR_BLACK);
+            }
+        }
+    }
+
+    // Row 4 (y=106): 配额 %   (left)   剩余 $X   (right, fallback 已用)
+    {
+        int y_q = 106;
+        int lx = hzk16_draw_gb_text(bar_x, y_q, gb_pei_e, ST7306_COLOR_BLACK);
+        if (a->quota_total > 0) {
+            char pct[16];
+            snprintf(pct, sizeof(pct), " %lu%%", (unsigned long)a->quota_used);
+            st7306_draw_text(lx, y_q, pct, ST7306_COLOR_BLACK);
         } else {
-            snprintf(left, sizeof(left), "--%%");
+            st7306_draw_text(lx, y_q, " --%", ST7306_COLOR_BLACK);
         }
-        st7306_draw_text(bar_x, bar_y + bar_h + 4, left, ST7306_COLOR_BLACK);
 
+        // Right: prefer "剩余 $X.XX" when budget known, else "已用 $X.XX"
         if (a->cost_cents > 0) {
-            snprintf(right, sizeof(right), "$%lu.%02lu",
-                     (unsigned long)a->cost_cents / 100,
-                     (unsigned long)a->cost_cents % 100);
-            int rw = st7306_text_width(right);
-            st7306_draw_text(bar_x + bar_w - rw, bar_y + bar_h + 4, right, ST7306_COLOR_BLACK);
+            char val[20];
+            const uint8_t *lbl;
+            if (a->budget_cents > 0 && a->budget_cents > a->cost_cents) {
+                uint32_t rem = a->budget_cents - a->cost_cents;
+                snprintf(val, sizeof(val), " $%lu.%02lu",
+                         (unsigned long)rem / 100, (unsigned long)rem % 100);
+                lbl = gb_sheng_yu;
+            } else {
+                snprintf(val, sizeof(val), " $%lu.%02lu",
+                         (unsigned long)a->cost_cents / 100,
+                         (unsigned long)a->cost_cents % 100);
+                lbl = gb_yi_yong;
+            }
+            int value_w = st7306_text_width(val);
+            int start_x = bar_x + bar_w - 32 - value_w;
+            int after = hzk16_draw_gb_text(start_x, y_q, lbl, ST7306_COLOR_BLACK);
+            st7306_draw_text(after, y_q, val, ST7306_COLOR_BLACK);
         }
     }
-    st7306_draw_hline(0, ST7306_WIDTH - 1, 148, ST7306_COLOR_BLACK);
+    st7306_draw_hline(0, ST7306_WIDTH - 1, 126, ST7306_COLOR_BLACK);
 
-    // === Section 4: rate / session / lines / project ===
-    {
+    // Row 5 (y=134): 速率 $0.55/h  (left)   时长 12h 57min  (right)
+    if (a->rate_cents_per_hour > 0) {
         char rate[24];
-        if (a->rate_cents_per_hour > 0) {
-            snprintf(rate, sizeof(rate), "$%lu.%02lu/h",
-                     (unsigned long)a->rate_cents_per_hour / 100,
-                     (unsigned long)a->rate_cents_per_hour % 100);
-            st7306_draw_text(8, 156, rate, ST7306_COLOR_BLACK);
-        }
+        snprintf(rate, sizeof(rate), " $%lu.%02lu/h",
+                 (unsigned long)a->rate_cents_per_hour / 100,
+                 (unsigned long)a->rate_cents_per_hour % 100);
+        int lx = hzk16_draw_gb_text(8, 134, gb_su_lv, ST7306_COLOR_BLACK);
+        st7306_draw_text(lx, 134, rate, ST7306_COLOR_BLACK);
     }
-    {
+    if (a->session_minutes > 0) {
         char sess[24];
-        if (a->session_minutes > 0) {
-            unsigned h = a->session_minutes / 60;
-            unsigned m = a->session_minutes % 60;
-            if (h > 0) snprintf(sess, sizeof(sess), "%uh %umin", h, m);
-            else       snprintf(sess, sizeof(sess), "%umin", m);
-            int sw = st7306_text_width(sess);
-            st7306_draw_text(ST7306_WIDTH - sw - 8, 156, sess, ST7306_COLOR_BLACK);
-        }
+        unsigned h = a->session_minutes / 60;
+        unsigned m = a->session_minutes % 60;
+        if (h > 0) snprintf(sess, sizeof(sess), " %uh %umin", h, m);
+        else       snprintf(sess, sizeof(sess), " %umin", m);
+        int value_w = st7306_text_width(sess);
+        int start_x = ST7306_WIDTH - 8 - 32 - value_w;
+        int after = hzk16_draw_gb_text(start_x, 134, gb_shi_chang, ST7306_COLOR_BLACK);
+        st7306_draw_text(after, 134, sess, ST7306_COLOR_BLACK);
+    }
+
+    // Row 6 (y=154): 启动 HH:MM  (left)   代码 +N / -M 行  (right)
+    if (a->session_start_sec > 0) {
+        time_t start = (time_t)a->session_start_sec;
+        struct tm tm_start;
+        localtime_r(&start, &tm_start);
+        char when[16];
+        snprintf(when, sizeof(when), " %02u:%02u",
+                 (unsigned)tm_start.tm_hour, (unsigned)tm_start.tm_min);
+        int lx = hzk16_draw_gb_text(8, 154, gb_qi_dong, ST7306_COLOR_BLACK);
+        st7306_draw_text(lx, 154, when, ST7306_COLOR_BLACK);
     }
     if (a->lines_added > 0 || a->lines_removed > 0) {
         char ln[40];
-        snprintf(ln, sizeof(ln), "+%lu / -%lu lines",
+        snprintf(ln, sizeof(ln), " +%lu / -%lu ",
                  (unsigned long)a->lines_added,
                  (unsigned long)a->lines_removed);
-        st7306_draw_text(8, 176, ln, ST7306_COLOR_BLACK);
+        int value_w = st7306_text_width(ln) + 16;  // +16 for 行
+        int start_x = ST7306_WIDTH - 8 - 32 - value_w;
+        int after = hzk16_draw_gb_text(start_x, 154, gb_dai_ma, ST7306_COLOR_BLACK);
+        st7306_draw_text(after, 154, ln, ST7306_COLOR_BLACK);
+        int after_value = after + st7306_text_width(ln);
+        hzk16_draw_gb_text(after_value, 154, gb_hang, ST7306_COLOR_BLACK);
     }
+
+    // Row 7 (y=174): 项目 esp32-rlcd-apps
     if (a->project[0]) {
-        char pr[28];
-        snprintf(pr, sizeof(pr), "%.24s", a->project);
-        st7306_draw_text(8, 196, pr, ST7306_COLOR_BLACK);
+        char pr[36];
+        snprintf(pr, sizeof(pr), " %.30s", a->project);
+        int lx = hzk16_draw_gb_text(8, 174, gb_xiang_mu, ST7306_COLOR_BLACK);
+        st7306_draw_text(lx, 174, pr, ST7306_COLOR_BLACK);
     }
 
     state_manager_unlock();
